@@ -74,6 +74,8 @@ const st = {
   xView: 1,
   /** Метод фронтов: считать, пока фронты ещё могут встретиться. */
   untilQuiet: true,
+  /** Шаг веера: скачок деформации на один луч простой волны (метод фронтов). */
+  fanStep: 2.5e-4,
   /** Окно диаграммы x–t при масштабировании (null — весь расчёт). */
   xtWin: null as null | { x0: number; x1: number; t0: number; t1: number },
   /** Точка, выбранная щелчком на диаграмме x–t (с подписью). */
@@ -237,6 +239,21 @@ function buildControls() {
   });
   ql.append(qcb, 'считать, пока фронты могут встретиться (метод фронтов)');
   fsN.appendChild(ql);
+  const fanSel = document.createElement('select');
+  for (const [v, l] of [
+    [5e-4, 'грубо — 5·10⁻⁴ на луч'],
+    [2.5e-4, 'обычно — 2.5·10⁻⁴ (по умолчанию)'],
+    [1e-4, 'мелко — 1·10⁻⁴ (в 2–3 раза дольше)'],
+    [5e-5, 'очень мелко — 5·10⁻⁵ (в 5–10 раз дольше)'],
+  ] as [number, string][])
+    fanSel.add(new Option(l, String(v)));
+  fanSel.value = String(st.fanStep);
+  fanSel.title = 'Простая волна (веер) в методе фронтов представлена набором слабых фронтов-лучей; чем мельче шаг, тем ближе к непрерывному вееру, но тем больше встреч фронтов';
+  fanSel.addEventListener('change', () => {
+    st.fanStep = +fanSel.value;
+    schedule();
+  });
+  row(fsN, 'Шаг веера', fanSel, 's-fan-step');
   const fl = document.createElement('label');
   fl.className = 'check';
   const fcb = document.createElement('input');
@@ -437,14 +454,14 @@ async function compute() {
         renderStatus();
       }
     };
-    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet } });
+    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet, fanStep: st.fanStep } });
     else worker.postMessage({ id, method: 'fv', prob });
   } catch {
     // запасной путь — в основном потоке
     const t0 = performance.now();
     if (st.method === 'fronts') {
       const { trackFronts } = await import('../core/fronts.ts');
-      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet });
+      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet, fanStep: st.fanStep });
       done(framesFromFronts(fr), performance.now() - t0, fr);
     } else {
       const { simulate } = await import('../core/fv1d.ts');
@@ -517,7 +534,7 @@ function renderStatus() {
   if (r && fr && !st.computing) {
     add(
       'info',
-      `Метод волновых фронтов: ${fr.events} событий (удары, остановки, встречи и отражения фронтов), до ${fr.maxFronts} фронтов одновременно, ${st.ms.toFixed(0)} мс. ` +
+      `Метод волновых фронтов: ${fr.events} событий (удары, остановки, встречи и отражения фронтов), до ${fr.maxFronts} фронтов одновременно, шаг веера ${st.fanStep.toExponential(1)}, ${st.ms.toFixed(0)} мс. ` +
         `На каждом фронте точно выполнены условия на разрывах (2.40)–(2.42); простые волны представлены пучками слабых фронтов. ` +
         `Кинематический баланс ${fr.kinematicError.toExponential(1)}. Энергия: работа границы ${fmt(fr.work, 4)} = прирост энергии ${fmt(fr.energyGain, 4)} + диссипация на ударных фронтах (2.45) ${fmt(fr.dissipation, 3)} (расхождение ${(fr.work - fr.energyGain - fr.dissipation).toExponential(1)}).`,
     );

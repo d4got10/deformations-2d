@@ -126,6 +126,12 @@ try {
     await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts && window.__series.F0[0] === -0.0005 && window.__series.pulses.length === 2, null, { timeout: 90000 });
     if (await page.evaluate(() => window.__series.fronts.warnings.length)) fail('материал 2, растяжение: предупреждения метода фронтов');
     await page.locator('#s-xt').screenshot({ path: `${outDir}/series-m2-tension-${scheme}.png` });
+    // мелкий шаг веера: расчёт идёт с новым шагом и без предупреждений
+    await page.selectOption('#s-fan-step', '0.0001');
+    await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts && window.__series.fanStep === 1e-4, null, { timeout: 120000 });
+    await page.waitForTimeout(300);
+    if (await page.evaluate(() => window.__series.computing !== 0 || window.__series.fronts.warnings.length)) fail('мелкий шаг веера: расчёт не завершился или с предупреждениями');
+    await page.selectOption('#s-fan-step', '0.00025');
     await page.selectOption('#s-material', { index: 0 });
     // один удар: численное решение совпадает с точным (пунктир)
     await page.selectOption('#s-pulse-preset', 'Один удар (проверка по §2.3)');

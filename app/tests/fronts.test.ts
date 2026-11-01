@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { boundaryProblem, riemannProblem, stateAt, trackFronts } from '../src/core/fronts.ts';
 import { cell, simulate } from '../src/core/fv1d.ts';
-import { solveImpact } from '../src/core/impact.ts';
+import { profileAt, solveImpact } from '../src/core/impact.ts';
 import { normalize } from '../src/core/material.ts';
 import { traction } from '../src/core/material1d.ts';
 import { MATERIAL_1, MATERIAL_2 } from '../src/core/presets.ts';
@@ -191,4 +191,29 @@ describe('режим «до затухания взаимодействий»', 
       expect(Math.abs(res.kinematicError)).toBeLessThan(1e-8);
     });
   }
+});
+
+describe('метод фронтов: сходимость веера при уменьшении шага', () => {
+  it('рывок наружу: ошибка профиля p в веере убывает примерно пропорционально шагу', () => {
+    const m = normalize(MATERIAL_1);
+    const F0 = [-0.00005, 0, 0.001] as [number, number, number];
+    const d = -0.003;
+    const ex = solveImpact({ material: m, F0, bc: { type: 'velocity', d } })!;
+    expect(ex.waves.some((w) => w.kind === 'fan')).toBe(true);
+    const T = 0.5;
+    const errs: number[] = [];
+    for (const fanStep of [5e-4, 2.5e-4, 1e-4]) {
+      const r = trackFronts({ material: m, F0, pulses: [{ start: 0, duration: 1, d }], tEnd: T, frames: 2, fanStep, xMax: 1.2 });
+      const f = r.frames.at(-1)!;
+      let e = 0;
+      const n = 2000;
+      for (let i = 0; i < n; i++) {
+        const x = ((i + 0.5) / n) * 0.6;
+        e += Math.abs(stateAt(f, x).F[0] - profileAt(ex, x / f.t).F[0]) * (0.6 / n);
+      }
+      errs.push(e);
+    }
+    expect(errs[1]).toBeLessThan(errs[0] * 0.7);
+    expect(errs[2]).toBeLessThan(errs[1] * 0.6);
+  });
 });
