@@ -103,6 +103,8 @@ try {
       const pk = await page.evaluate(() => ({ pick: window.__series.xtPick, t: window.__series.t, playing: window.__series.playing }));
       if (!pk.pick) fail('щелчок не выбрал точку на диаграмме');
       else if (Math.abs(pk.t - pk.pick.t) > 1e-9 || pk.playing) fail('щелчок не перевёл время анимации на выбранный момент');
+      if (pk.pick && !pk.pick.lines.some((l) => l.includes('встреча') || l.includes('у границы')) && !pk.pick.lines.some((l) => l.includes('p = u1,1')))
+        fail('в подписи точки нет значений деформаций');
       await page.locator('#s-xt').screenshot({ path: `${outDir}/xt-zoom-pick-${scheme}.png` });
       await page.mouse.dblclick(cx, cy);
       await page.waitForTimeout(150);

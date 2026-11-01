@@ -747,6 +747,41 @@ function setupXtZoom() {
   cv.parentElement!.appendChild(box);
 }
 
+/** Состояние среды в точке (x, t): точное для метода фронтов, из ближайшего кадра для КО. */
+function stateAtXt(x: number, t: number): { F: Vec3; v: Vec3 } {
+  if (st.fronts) {
+    const fr = st.fronts;
+    const nF = fr.frames.length;
+    const k = Math.max(0, Math.min(nF - 1, Math.floor((t / fr.tEnd) * (nF - 1) + 1e-9)));
+    const f = fr.frames[k];
+    const dt = t - f.t;
+    let j = 0;
+    while (j < f.xs.length && f.xs[j] + f.speeds[j] * dt < x) j++;
+    const sv = f.states[j];
+    return { F: [sv.F[0], 0, sv.F[1]], v: [sv.v[0], 0, sv.v[1]] };
+  }
+  const r = st.res!;
+  const i = Math.max(0, Math.min(r.N - 1, Math.floor(x / r.dx)));
+  return cell(frameAt(t), r.N, i);
+}
+
+const num = (v: number) => (Math.abs(v) < 1e-10 ? '0' : Math.abs(v) < 1e-3 || Math.abs(v) >= 1e4 ? v.toExponential(3) : v.toFixed(5));
+
+/** Строки подписи со значениями деформаций, скоростей и напряжений в состоянии. */
+function stateLines(S: { F: Vec3; v: Vec3 }, title?: string): string[] {
+  const m = normalize(st.material);
+  const T = traction(m, S.F);
+  const T0 = traction(m, st.F0);
+  const out = [
+    `p = u1,1 = ${num(S.F[0])}   (p − p0 = ${num(S.F[0] - st.F0[0])})`,
+    `s = u3,1 = ${num(S.F[2])}   (s − s0 = ${num(S.F[2] - st.F0[2])})`,
+    `v1/c1 = ${num(S.v[0])},  v3/c1 = ${num(S.v[2])}`,
+    `σ11/(λ+2μ) = ${num(T[0])}   (Δ = ${num(T[0] - T0[0])})`,
+    `σ31/(λ+2μ) = ${num(T[2])}`,
+  ];
+  return title ? [title, ...out.map((l) => '  ' + l)] : out;
+}
+
 const FAM_NAME = { fast: 'квазипродольный', slow: 'квазипоперечный' } as const;
 
 /**
@@ -756,7 +791,7 @@ const FAM_NAME = { fast: 'квазипродольный', slow: 'квазипо
  */
 function pickXt(px: number, py: number, x: number, t: number) {
   const toPx = xtToPx;
-  let pick = { x, t, lines: [`t c1/L = ${fmt(t, 4)}`, `x1/L = ${fmt(x, 4)}`] };
+  let pick = { x, t, lines: [`t c1/L = ${fmt(t, 4)},  x1/L = ${fmt(x, 4)}`, ...stateLines(stateAtXt(x, t))] };
   const segs = st.fronts?.segments ?? [];
   if (segs.length && st.showFronts) {
     // 1) события — начала отрезков фронтов (рождение на границе, встреча, отражение)
@@ -811,6 +846,11 @@ function pickXt(px: number, py: number, x: number, t: number) {
             `рождён при t = ${fmt(fb.t0, 4)}`,
           ],
         };
+        // состояния по обе стороны фронта (немного отступив от него)
+        const eps = 1e-6 * Math.max(1, st.xView);
+        const ahead = stateAtXt(pick.x + eps, tt);
+        const behind = stateAtXt(pick.x - eps, tt);
+        pick.lines.push(...stateLines(ahead, 'перед фронтом (x больше):'), ...stateLines(behind, 'за фронтом (x меньше):'));
       }
     }
   }
@@ -1010,6 +1050,7 @@ function drawXt() {
       let by = py - lh - 8;
       if (bx + lw > w - m.r) bx = px - lw - 10;
       if (by < m.t) by = py + 10;
+      by = Math.max(m.t, Math.min(by, h - m.b - lh)); // высокая подпись не выходит за поле
       ctx.globalAlpha = 0.94;
       ctx.fillRect(bx, by, lw, lh);
       ctx.globalAlpha = 1;
