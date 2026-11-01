@@ -456,3 +456,77 @@ canvas[hidden] {
   color: var(--muted);
   font-weight: 400;
 }
+
+/* Серия ударов */
+canvas.strip {
+  display: block;
+  width: 100%;
+  height: 240px;
+}
+.xt-wrap {
+  margin-top: 12px;
+}
+canvas.xt {
+  display: block;
+  width: 100%;
+  height: min(55vh, 460px);
+}
+.pulses {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0;
+}
+.pulse-row {
+  display: grid;
+  grid-template-columns: 18px repeat(3, minmax(0, 1fr)) 26px;
+  gap: 4px;
+  align-items: center;
+  font-size: 12px;
+}
+.pulse-row.head {
+  color: var(--muted);
+}
+.pulse-row input {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 4px;
+}
+.pulse-row button {
+  padding: 2px 0;
+}
+#s-status .msg {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+#s-status .info {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+#s-status .err {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+.row.wide select,
+.row.wide input {
+  width: 100%;
+  min-width: 0;
+}
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 12px;
+}
+@media (max-width: 860px) {
+  .two-col {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

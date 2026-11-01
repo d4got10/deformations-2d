@@ -30,6 +30,8 @@ export interface ImpactProblem {
   material: Material;
   /** Предварительная деформация (покой). */
   F0: Vec3;
+  /** Скорость среды впереди (по умолчанию покой). Нужна, например, для повторного удара по уже движущейся среде. */
+  v0?: Vec3;
   bc: { type: 'velocity'; d: number } | { type: 'strain'; F: Vec3 };
   /** Какую формулу напряжений использовать: из потенциала (1.9) или напечатанную (2.29). */
   stressLaw?: 'model' | 'printed229';
@@ -278,8 +280,13 @@ export function solveImpact(prob: ImpactProblem, forcePattern?: string): ImpactS
     const t = target;
     end = (X2) => [X2[0] - t[0], X2[1] - t[1]];
   } else {
+    // у границы v = v0 + Δv = (d, 0, 0); в плоскости поляризации: (v_n, v_τ)
     const d = prob.bc.d;
-    end = (_X2, dv) => [dv[0] - d, dv[1] - 0];
+    const v0 = prob.v0 ?? [0, 0, 0];
+    const need: Vec2 = [d - v0[0], -(v0[1] * e0[0] + v0[2] * e0[1])];
+    if (Math.abs(v0[1] * e0[1] - v0[2] * e0[0]) > 1e-12)
+      throw new Error('Скорость среды впереди должна лежать в плоскости предварительного сдвига');
+    end = (_X2, dv) => [dv[0] - need[0], dv[1] - need[1]];
   }
 
   // Начальное приближение — линеаризация у X0
@@ -296,11 +303,17 @@ export function solveImpact(prob: ImpactProblem, forcePattern?: string): ImpactS
     A = (dX[0] * rs[1] - rs[0] * dX[1]) / det;
     B = (rf[0] * dX[1] - dX[0] * rf[1]) / det;
   } else {
-    // v* = −ξf A rf − ξs B rs
+    // Δv = −ξf A rf − ξs B rs (правило Крамера)
     const d = (prob.bc as { d: number }).d;
-    const det = -xf * rf[0] * (-xs * rs[1]) + xs * rs[0] * (xf * rf[1]);
-    A = (d * (-xs * rs[1])) / det;
-    B = -(d * (-xf * rf[1])) / det;
+    const v0 = prob.v0 ?? [0, 0, 0];
+    const need: Vec2 = [d - v0[0], -(v0[1] * e0[0] + v0[2] * e0[1])];
+    const a11 = -xf * rf[0];
+    const a12 = -xs * rs[0];
+    const a21 = -xf * rf[1];
+    const a22 = -xs * rs[1];
+    const det = a11 * a22 - a12 * a21;
+    A = (need[0] * a22 - a12 * need[1]) / det;
+    B = (a11 * need[1] - need[0] * a21) / det;
   }
   const X1g: Vec2 = [X0[0] + A * rf[0], X0[1] + A * rf[1]];
   const X2g: Vec2 = target ?? [X1g[0] + B * rs[0], X1g[1] + B * rs[1]];
@@ -357,7 +370,7 @@ function assemble(prob: ImpactProblem, P: Plane, X0: Vec2, eStar: Vec2 | null, c
   }
 
   let F: Vec3 = prob.F0;
-  let v: Vec3 = [0, 0, 0];
+  let v: Vec3 = prob.v0 ? [...prob.v0] : [0, 0, 0];
   let e = e0;
   zones.push(mk('0', F, v));
   const pushZone = () => zones.push(mk(romans[zones.length] ?? String(zones.length), F, v));

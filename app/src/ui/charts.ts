@@ -141,7 +141,12 @@ export function lineChart(opts: {
   const [x0, x1] = opts.xRange ?? [Math.min(...xs), Math.max(...xs)];
   let y0 = Math.min(...ys);
   let y1 = Math.max(...ys);
-  const pad = (y1 - y0 || 1) * 0.08;
+  if (y1 - y0 < 1e-15 * Math.max(1, Math.abs(y1))) {
+    // все значения одинаковы: показать от нуля до значения с запасом
+    y0 = Math.min(0, y0);
+    y1 = y1 > 0 ? y1 * 1.25 : y1 < 0 ? 0 : 1;
+  }
+  const pad = (y1 - y0) * 0.08;
   y0 = opts.allowNegative ? y0 - pad : Math.max(0, y0 - pad);
   y1 += pad;
   const X = (x: number) => m.l + ((x - x0) / (x1 - x0 || 1)) * (W - m.l - m.r);

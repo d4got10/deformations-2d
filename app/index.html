@@ -15,6 +15,7 @@
       </p>
       <nav class="tabs" role="tablist">
         <button role="tab" id="tab-impact" data-page="impact" aria-selected="true">Удар по границе (глава 2)</button>
+        <button role="tab" id="tab-series" data-page="series" aria-selected="false">Серия ударов</button>
         <button role="tab" id="tab-load" data-page="load" aria-selected="false">Подвижная нагрузка (§3.2)</button>
       </nav>
     </header>
@@ -46,6 +47,28 @@
           <h2>Скорости волн в зависимости от граничного воздействия (как рис. 12, 14)</h2>
           <div id="i-sweep-controls" class="sweep-controls"></div>
           <div id="i-sweep" class="sweep-pair"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Серия ударов -->
+    <div id="page-series" class="page" role="tabpanel" hidden>
+      <main>
+        <aside id="s-controls"></aside>
+        <section>
+          <div class="scene-wrap">
+            <canvas id="s-scene" class="strip" aria-label="Сечение материала в выбранный момент времени"></canvas>
+          </div>
+          <div class="scene-wrap xt-wrap">
+            <canvas id="s-xt" class="xt" aria-label="Диаграмма x–t"></canvas>
+          </div>
+          <p class="hint">Волны сжатия всех ударов бегут почти с одной скоростью ≈ c1 и идут параллельно. Взаимодействие ударов лучше видно на сдвиге (цвет «s − s0»): каждый удар порождает ещё и медленную квазипоперечную волну (≈ 0.57 c1), которую пересекают волны сжатия следующих ударов.</p>
+          <div id="s-status"></div>
+          <h2>Профили в выбранный момент времени</h2>
+          <p class="hint">До первого изменения скорости границы пунктиром показано точное автомодельное решение §2.3 — численное должно с ним совпадать.</p>
+          <div id="s-profiles" class="two-col"></div>
+          <h2>Граница</h2>
+          <div id="s-boundary" class="sweep-pair"></div>
         </section>
       </main>
     </div>
