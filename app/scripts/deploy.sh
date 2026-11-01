@@ -7,7 +7,7 @@ rev=$(git -C "$root" rev-parse --short HEAD)
 (cd "$root/app" && npm run build)
 tmp=$(mktemp -d)
 git -C "$root" fetch origin gh-pages
-git -C "$root" worktree add "$tmp" origin/gh-pages --detach
+git -C "$root" worktree add "$tmp" FETCH_HEAD --detach
 find "$tmp" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 cp -r "$root/app/dist/." "$tmp/"
 touch "$tmp/.nojekyll"
