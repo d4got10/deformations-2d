@@ -84,6 +84,8 @@ const st = {
   magnifyT: 1000,
   /** Усиливать поперечные (сдвиговые) перемещения отдельно; по умолчанию масштаб общий — видно чистое сжатие. */
   boostShear: false,
+  /** Пучки простых волн на профилях — непрерывно (линейно между лучами), а не ступеньками. */
+  smoothFans: true,
   view: '2d' as '2d' | '3d',
   playing: true,
   speed: 0.12,
@@ -259,6 +261,18 @@ function buildControls() {
   });
   wl.append(wcb, 'показать слабые фронты (отражения при встречах; яркость — по логарифму скачка)');
   fsN.appendChild(wl);
+  const sl = document.createElement('label');
+  sl.className = 'check';
+  const scb = document.createElement('input');
+  scb.type = 'checkbox';
+  scb.id = 's-smooth-fans';
+  scb.checked = st.smoothFans;
+  scb.addEventListener('change', () => {
+    st.smoothFans = scb.checked;
+    drawAll();
+  });
+  sl.append(scb, 'простые волны (пучки) на профилях — плавно, а не набором ступенек');
+  fsN.appendChild(sl);
   const nsel = document.createElement('select');
   for (const n of [400, 800, 1600]) nsel.add(new Option(`${n} ячеек${n === 800 ? ' (по умолчанию)' : ''}`, String(n)));
   nsel.value = String(st.N);
@@ -1393,6 +1407,60 @@ function exactFirst(t: number) {
   }
 }
 
+/**
+ * Состояние в момент t с непрерывными простыми волнами. Метод фронтов представляет центрированный
+ * пучок (в точном решении — непрерывную волну) набором слабых фронтов-лучей с шагом по амплитуде
+ * fanStep. Здесь внутри пучка состояние интерполируется линейно: крайние состояния — на крайних
+ * лучах, промежуточные — посередине между соседними лучами. Ударные волны остаются разрывами.
+ */
+function smoothStateFn(f: FrontsFrame, xs: number[]) {
+  const runs: { a: number; b: number }[] = [];
+  for (let k = 0; k < xs.length; ) {
+    let b = k;
+    if (f.fan[k] >= 0) while (b + 1 < xs.length && f.fan[b + 1] === f.fan[k]) b++;
+    if (b > k) runs.push({ a: k, b });
+    k = b + 1;
+  }
+  const toV3 = (F: number[], v: number[]) => ({ F: [F[0], 0, F[1]] as Vec3, v: [v[0], 0, v[1]] as Vec3 });
+  return (x: number) => {
+    // пучок, содержащий x
+    let lo = 0;
+    let hi = runs.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const r = runs[mid];
+      if (x < xs[r.a]) hi = mid - 1;
+      else if (x > xs[r.b]) lo = mid + 1;
+      else {
+        // узлы: (xs[a], S[a]), (середины, S[a+1..b]), (xs[b], S[b+1])
+        const nx: number[] = [xs[r.a]];
+        const ns = [f.states[r.a]];
+        for (let k = r.a + 1; k <= r.b; k++) {
+          nx.push((xs[k - 1] + xs[k]) / 2);
+          ns.push(f.states[k]);
+        }
+        nx.push(xs[r.b]);
+        ns.push(f.states[r.b + 1]);
+        let j = 1;
+        while (j < nx.length - 1 && nx[j] < x) j++;
+        const w = nx[j] > nx[j - 1] ? (x - nx[j - 1]) / (nx[j] - nx[j - 1]) : 1;
+        const A = ns[j - 1];
+        const B = ns[j];
+        return toV3([A.F[0] + w * (B.F[0] - A.F[0]), A.F[1] + w * (B.F[1] - A.F[1])], [A.v[0] + w * (B.v[0] - A.v[0]), A.v[1] + w * (B.v[1] - A.v[1])]);
+      }
+    }
+    let j = 0;
+    let h = xs.length;
+    while (j < h) {
+      const mid = (j + h) >> 1;
+      if (xs[mid] < x) j = mid + 1;
+      else h = mid;
+    }
+    const sv = f.states[j];
+    return toV3(sv.F, sv.v);
+  };
+}
+
 const profShared: SharedX = { win: null, full: () => [0, st.xView], redraw: () => renderProfiles() };
 let profPlots: ReturnType<typeof createProfilePlot>[] = [];
 const PROFILE_ITEMS: [string, (F: Vec3, v: Vec3) => number][] = [
@@ -1421,8 +1489,10 @@ function renderProfiles() {
   const muted = css('--muted');
   let edges: number[];
   let states: { F: Vec3; v: Vec3 }[];
+  let smooth: ((x: number) => { F: Vec3; v: Vec3 }) | null = null;
   if (st.fronts) {
     const { f, xs } = frontsAt(t);
+    if (st.smoothFans && f.fan?.some((id, i) => id >= 0 && f.fan[i + 1] === id)) smooth = smoothStateFn(f, xs);
     edges = xs;
     states = f.states.map((sv) => ({ F: [sv.F[0], 0, sv.F[1]] as Vec3, v: [sv.v[0], 0, sv.v[1]] as Vec3 }));
   } else {
@@ -1431,7 +1501,20 @@ function renderProfiles() {
     states = Array.from({ length: r.N }, (_, i) => cell(fr, r.N, i));
   }
   PROFILE_ITEMS.forEach(([, fn], k) => {
-    const series: PlotSeries[] = [{ label: st.fronts ? 'метод фронтов' : 'конечные объёмы', color: acc, steps: { edges, vals: states.map((q) => fn(q.F, q.v)) } }];
+    const label = st.fronts ? 'метод фронтов' : 'конечные объёмы';
+    const series: PlotSeries[] = [
+      smooth
+        ? {
+            label,
+            color: acc,
+            fn: (x) => {
+              const q = smooth!(x);
+              return fn(q.F, q.v);
+            },
+            steps: { edges, vals: states.map((q) => fn(q.F, q.v)) }, // для автомасштаба (узкие пики)
+          }
+        : { label, color: acc, steps: { edges, vals: states.map((q) => fn(q.F, q.v)) } },
+    ];
     if (ex && t > 0)
       series.push({
         label: 'точное (§2.3)',

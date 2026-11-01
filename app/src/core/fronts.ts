@@ -92,6 +92,12 @@ export interface FrontsFrame {
   speeds: number[];
   states: State[];
   ub: number;
+  /**
+   * Принадлежность фронтов пучкам простых волн: соседние фронты с одинаковым номером ≥ 0 — лучи
+   * одного центрированного пучка (одно семейство, общее место и время рождения); −1 — отдельный фронт.
+   * В точном решении пучок — непрерывная волна; набор слабых фронтов — его кусочно-постоянная аппроксимация.
+   */
+  fan: number[];
 }
 
 export interface FrontsResult {
@@ -255,7 +261,9 @@ function wave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number):
     // [v] = −G_signed [F] с [·] = справа − слева  ⇒  v_b = v_a + dir·G·(F_a − F_b)
     const v: V2 = [cur.v[0] + dir * G * (cur.F[0] - Xb[0]), cur.v[1] + dir * G * (cur.F[1] - Xb[1])];
     const behind = { F: Xb, v };
-    pieces.push({ G: dir * G, behind, kind: n === 1 ? 'shock' : e > 0 ? 'shock' : 'simple' });
+    // ступенька разрежения (e < 0 у истинно нелинейного семейства) — фронт простой волны, даже если
+    // он один (так выходят лучи пучка из задачи о распаде разрыва после пересечения с другой волной)
+    pieces.push({ G: dir * G, behind, kind: R.gnl && e < 0 ? 'simple' : 'shock' });
     const dl = Math.hypot(Xb[0] - cur.F[0], Xb[1] - cur.F[1]);
     if (dl > 0) prevDir = [(Xb[0] - cur.F[0]) / dl, (Xb[1] - cur.F[1]) / dl];
     cur = behind;
@@ -597,7 +605,31 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
     return { left: res.slow.behind, seq };
   };
 
-  const snapshot = () => frames.push({ t, xs: fronts.map((f) => f.x), speeds: fronts.map((f) => f.speed), states: states.map((s) => ({ F: [...s.F] as V2, v: [...s.v] as V2 })), ub });
+  // лучи одного пучка: соседние фронты простой волны одного семейства, идущие в одну сторону,
+  // со скачками одного знака (после пересечений с другими волнами лучи «перерождаются», поэтому
+  // время и место рождения не годятся как признак)
+  const fanIds = () => {
+    const ids: number[] = [];
+    let id = -1;
+    fronts.forEach((f, i) => {
+      const p = fronts[i - 1];
+      if (f.kind !== 'simple') return ids.push(-1);
+      let same = !!p && p.kind === 'simple' && p.fam === f.fam && Math.sign(p.speed) === Math.sign(f.speed);
+      if (same) {
+        const a = states[i - 1];
+        const b = states[i];
+        const c2 = states[i + 1];
+        const d1 = [b.F[0] - a.F[0], b.F[1] - a.F[1]];
+        const d2 = [c2.F[0] - b.F[0], c2.F[1] - b.F[1]];
+        same = d1[0] * d2[0] + d1[1] * d2[1] > 0;
+      }
+      if (!same) id++;
+      ids.push(id);
+    });
+    return ids;
+  };
+  const snapshot = () =>
+    frames.push({ t, xs: fronts.map((f) => f.x), speeds: fronts.map((f) => f.speed), states: states.map((s) => ({ F: [...s.F] as V2, v: [...s.v] as V2 })), ub, fan: fanIds() });
 
   // начальная краевая задача
   const changes = [...new Set(prob.pulses.flatMap((p) => [p.start, p.start + p.duration]))].filter((x) => x >= 0 && x < prob.tEnd).sort((a, b) => a - b);

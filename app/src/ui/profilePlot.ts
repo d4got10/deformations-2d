@@ -23,6 +23,7 @@ export interface PlotSeries {
   color: string;
   dash?: number[];
   steps?: StepData;
+  /** Если задана — рисуется она (с шагом в пиксель), а steps используются только для автомасштаба. */
   fn?: (x: number) => number;
 }
 
@@ -185,7 +186,7 @@ export function createProfilePlot(parent: HTMLElement, title: string, xLabel: st
       ctx.lineWidth = s.dash ? 1.4 : 1.8;
       ctx.setLineDash(s.dash ?? []);
       ctx.beginPath();
-      if (s.steps) {
+      if (s.steps && !s.fn) {
         const { edges, vals } = s.steps;
         // только видимые ступени
         let k = 0;
@@ -238,7 +239,7 @@ export function createProfilePlot(parent: HTMLElement, title: string, xLabel: st
       ctx.setLineDash([]);
       const lines = [`x1/L = ${fmt(x, 5)}`];
       for (const s of series) {
-        const v = s.steps ? stepAt(s.steps, x) : s.fn!(x);
+        const v = s.fn ? s.fn(x) : stepAt(s.steps!, x);
         lines.push(`${series.length > 1 ? s.label + ': ' : ''}${v === 0 ? '0' : Math.abs(v) < 1e-3 || Math.abs(v) >= 1e5 ? v.toExponential(5) : v.toPrecision(6)}`);
         ctx.fillStyle = s.color;
         ctx.beginPath();
