@@ -3,7 +3,7 @@
  * Решение нестационарное (волны разных ударов догоняют друг друга) — считается численно (fv1d.ts),
  * а до встречи волн сравнивается с точным автомодельным решением главы 2.
  */
-import { type FrontsResult, type Segment, stateAt } from '../core/fronts.ts';
+import { type FrontsFrame, type FrontsResult, type Segment, stateAt } from '../core/fronts.ts';
 import { type Pulse, type SeriesFrame, type SeriesProblem, type SeriesResult, boundaryVelocity, cell } from '../core/fv1d.ts';
 import { profileAt, solveImpact } from '../core/impact.ts';
 import { type Material, normalize } from '../core/material.ts';
@@ -553,7 +553,78 @@ function storedFrameAt(t: number) {
   return r.frames[k];
 }
 
-let exactFrame: { t: number; id: number; f: SeriesFrame } | null = null;
+/**
+ * Фронты в момент t: берётся ближайший сохранённый момент и фронты сдвигаются со своими скоростями.
+ * Сдвигать можно только до первой встречи фронтов (или удара о границу): дальше рождаются новые
+ * волны, а фронты, «прошедшие сквозь» друг друга, поставили бы состояния не на свои места —
+ * при большом увеличении смещений это выглядит как прыжок сетки. Поэтому сначала пробуем шаг
+ * вперёд от предыдущего момента, затем назад от следующего, а если встреча есть в обе стороны —
+ * сдвигаем вперёд только до момента встречи (задержка — не больше интервала между моментами).
+ */
+function frontsAt(t: number): { f: FrontsFrame; xs: number[] } {
+  const fr = st.fronts!;
+  const nF = fr.frames.length;
+  const k = Math.max(0, Math.min(nF - 1, Math.floor((t / fr.tEnd) * (nF - 1) + 1e-9)));
+  const move = (f: FrontsFrame, dt: number) => f.xs.map((x, i) => x + f.speeds[i] * dt);
+  const valid = (xs: number[]) => {
+    for (let i = 0; i < xs.length; i++) if (xs[i] < -1e-12 || (i > 0 && xs[i] < xs[i - 1] - 1e-12)) return false;
+    return true;
+  };
+  const f = fr.frames[k];
+  const fwd = move(f, t - f.t);
+  if (valid(fwd)) return { f, xs: fwd };
+  if (k + 1 < nF) {
+    const g = fr.frames[k + 1];
+    const back = move(g, t - g.t);
+    if (valid(back)) return { f: g, xs: back };
+  }
+  // первая встреча соседних фронтов (или фронта с границей) после f.t
+  let tc = t - f.t;
+  for (let i = 0; i < f.xs.length; i++) {
+    if (f.speeds[i] < 0) tc = Math.min(tc, f.xs[i] / -f.speeds[i]);
+    if (i > 0 && f.speeds[i - 1] > f.speeds[i]) tc = Math.min(tc, (f.xs[i] - f.xs[i - 1]) / (f.speeds[i - 1] - f.speeds[i]));
+  }
+  return { f, xs: move(f, Math.max(0, tc)) };
+}
+
+let exactFrame: { t: number; id: number; f: SeriesFrame; du1: Float64Array; du3: Float64Array } | null = null;
+
+/**
+ * Точные перемещения в узлах x_i = i·dx для метода фронтов: Δu(x) = −∫_x^{xView} (F − F0) dx',
+ * интеграл кусочно-постоянной функции берётся по истинным положениям фронтов, а не по ячейкам.
+ * (Суммирование по ячейкам ошибается на ΔF·dx/2 на каждом фронте — после умножения на
+ * коэффициент увеличения смещений картинка дрожит при движении фронтов через ячейки.)
+ */
+function exactDisplacements(xs: number[], states: { F: number[] }[], N: number, dx: number) {
+  const P1 = new Float64Array(N + 1); // ∫_0^{x_i} (p − p0)
+  const P3 = new Float64Array(N + 1); // ∫_0^{x_i} (s − s0)
+  let j = 0;
+  let a1 = 0;
+  let a3 = 0;
+  let last = 0;
+  for (let i = 0; i <= N; i++) {
+    const x = i * dx;
+    while (j < xs.length && xs[j] < x) {
+      const xj = Math.max(last, xs[j]);
+      a1 += (xj - last) * (states[j].F[0] - st.F0[0]);
+      a3 += (xj - last) * (states[j].F[1] - st.F0[2]);
+      last = xj;
+      j++;
+    }
+    a1 += (x - last) * (states[j].F[0] - st.F0[0]);
+    a3 += (x - last) * (states[j].F[1] - st.F0[2]);
+    last = x;
+    P1[i] = a1;
+    P3[i] = a3;
+  }
+  const du1 = new Float64Array(N + 1);
+  const du3 = new Float64Array(N + 1);
+  for (let i = 0; i <= N; i++) {
+    du1[i] = P1[i] - P1[N];
+    du3[i] = P3[i] - P3[N];
+  }
+  return { du1, du3 };
+}
 
 /**
  * Кадр в момент t. Для метода фронтов строится точно в момент t (фронты сдвигаются со своими
@@ -565,11 +636,8 @@ function frameAt(t: number): SeriesFrame {
   if (exactFrame && exactFrame.t === t && exactFrame.id === reqId) return exactFrame.f;
   const r = st.res!;
   const N = r.N;
-  const nF = fr.frames.length;
-  const k = Math.max(0, Math.min(nF - 1, Math.floor((t / fr.tEnd) * (nF - 1) + 1e-9)));
-  const f = fr.frames[k];
+  const { f, xs } = frontsAt(t);
   const dt = t - f.t;
-  const xs = f.xs.map((x, i) => x + f.speeds[i] * dt);
   const U = exactFrame?.f.U.length === 6 * N ? exactFrame.f.U : new Float32Array(6 * N);
   let j = 0;
   for (let i = 0; i < N; i++) {
@@ -585,7 +653,8 @@ function frameAt(t: number): SeriesFrame {
   }
   // перемещение границы: скорость границы постоянна между событиями
   const ub = f.ub + f.states[0].v[0] * dt;
-  exactFrame = { t, id: reqId, f: { t, U, ub } };
+  const { du1, du3 } = exactDisplacements(xs, f.states, N, r.dx);
+  exactFrame = { t, id: reqId, f: { t, U, ub }, du1, du3 };
   return exactFrame.f;
 }
 
@@ -613,10 +682,7 @@ function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t
     const T = fr.tEnd;
     for (let col = 0; col < pw; col++) {
       const t = win.t0 + ((col + 0.5) / pw) * (win.t1 - win.t0);
-      const k = Math.max(0, Math.min(nF - 1, Math.floor((t / T) * (nF - 1) + 1e-9)));
-      const f = fr.frames[k];
-      const dt = t - f.t;
-      const xs = f.xs.map((x, i) => x + f.speeds[i] * dt);
+      const { f, xs } = frontsAt(t);
       // цвет каждого состояния этого момента
       const cols = f.states.map((sv) => diverging(fieldOf([sv.F[0], 0, sv.F[1]], [sv.v[0], 0, sv.v[1]]) / fieldMax, base));
       let j = 0;
@@ -787,13 +853,9 @@ function setupXtZoom() {
 /** Состояние среды в точке (x, t): точное для метода фронтов, из ближайшего кадра для КО. */
 function stateAtXt(x: number, t: number): { F: Vec3; v: Vec3 } {
   if (st.fronts) {
-    const fr = st.fronts;
-    const nF = fr.frames.length;
-    const k = Math.max(0, Math.min(nF - 1, Math.floor((t / fr.tEnd) * (nF - 1) + 1e-9)));
-    const f = fr.frames[k];
-    const dt = t - f.t;
+    const { f, xs } = frontsAt(t);
     let j = 0;
-    while (j < f.xs.length && f.xs[j] + f.speeds[j] * dt < x) j++;
+    while (j < xs.length && xs[j] < x) j++;
     const sv = f.states[j];
     return { F: [sv.F[0], 0, sv.F[1]], v: [sv.v[0], 0, sv.v[1]] };
   }
@@ -1148,11 +1210,17 @@ function drawStrip() {
   const half = (h - top - bottom) / 2 / sc;
   const oy = top + (h - top - bottom) / 2;
   // перемещения относительно предварительно деформированного состояния: Δu(x) = −∫_x^1 (F − F0) dx'
-  const du1 = new Float64Array(N + 1);
-  const du3 = new Float64Array(N + 1);
-  for (let i = N - 1; i >= 0; i--) {
-    du1[i] = du1[i + 1] - (fr.U[i] - st.F0[0]) * r.dx;
-    du3[i] = du3[i + 1] - (fr.U[2 * N + i] - st.F0[2]) * r.dx;
+  let du1: Float64Array;
+  let du3: Float64Array;
+  if (st.fronts && exactFrame && exactFrame.f === fr) {
+    ({ du1, du3 } = exactFrame); // точные перемещения по положениям фронтов
+  } else {
+    du1 = new Float64Array(N + 1);
+    du3 = new Float64Array(N + 1);
+    for (let i = N - 1; i >= 0; i--) {
+      du1[i] = du1[i + 1] - (fr.U[i] - st.F0[0]) * r.dx;
+      du3[i] = du3[i + 1] - (fr.U[2 * N + i] - st.F0[2]) * r.dx;
+    }
   }
   const K = st.magnify;
   const Kt = st.magnifyT;
