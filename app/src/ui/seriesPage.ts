@@ -4,7 +4,7 @@
  * а до встречи волн сравнивается с точным автомодельным решением главы 2.
  */
 import { type FrontsResult, type Segment, stateAt } from '../core/fronts.ts';
-import { type Pulse, type SeriesProblem, type SeriesResult, boundaryVelocity, cell } from '../core/fv1d.ts';
+import { type Pulse, type SeriesFrame, type SeriesProblem, type SeriesResult, boundaryVelocity, cell } from '../core/fv1d.ts';
 import { profileAt, solveImpact } from '../core/impact.ts';
 import { type Material, normalize } from '../core/material.ts';
 import { type Vec3, traction } from '../core/material1d.ts';
@@ -546,10 +546,47 @@ function fieldOf(F: Vec3, v: Vec3): number {
   }
 }
 
-function frameAt(t: number) {
+/** Ближайший сохранённый кадр (для КО — единственный источник; для фронтов — для редких перерисовок). */
+function storedFrameAt(t: number) {
   const r = st.res!;
   const k = Math.max(0, Math.min(r.frames.length - 1, Math.round((t / st.tEnd) * (r.frames.length - 1))));
   return r.frames[k];
+}
+
+let exactFrame: { t: number; id: number; f: SeriesFrame } | null = null;
+
+/**
+ * Кадр в момент t. Для метода фронтов строится точно в момент t (фронты сдвигаются со своими
+ * скоростями от ближайшего предыдущего события), поэтому анимация плавная при любой длине расчёта.
+ */
+function frameAt(t: number): SeriesFrame {
+  const fr = st.fronts;
+  if (!fr) return storedFrameAt(t);
+  if (exactFrame && exactFrame.t === t && exactFrame.id === reqId) return exactFrame.f;
+  const r = st.res!;
+  const N = r.N;
+  const nF = fr.frames.length;
+  const k = Math.max(0, Math.min(nF - 1, Math.floor((t / fr.tEnd) * (nF - 1) + 1e-9)));
+  const f = fr.frames[k];
+  const dt = t - f.t;
+  const xs = f.xs.map((x, i) => x + f.speeds[i] * dt);
+  const U = exactFrame?.f.U.length === 6 * N ? exactFrame.f.U : new Float32Array(6 * N);
+  let j = 0;
+  for (let i = 0; i < N; i++) {
+    const x = (i + 0.5) * r.dx;
+    while (j < xs.length && xs[j] < x) j++;
+    const sv = f.states[j];
+    U[i] = sv.F[0];
+    U[N + i] = 0;
+    U[2 * N + i] = sv.F[1];
+    U[3 * N + i] = sv.v[0];
+    U[4 * N + i] = 0;
+    U[5 * N + i] = sv.v[1];
+  }
+  // перемещение границы: скорость границы постоянна между событиями
+  const ub = f.ub + f.states[0].v[0] * dt;
+  exactFrame = { t, id: reqId, f: { t, U, ub } };
+  return exactFrame.f;
 }
 
 let exactCache: { key: string; img: HTMLCanvasElement } | null = null;
@@ -1292,7 +1329,7 @@ function renderProfiles() {
   box.innerHTML = '';
   if (!st.res) return;
   const r = st.res;
-  const fr = frameAt(st.t);
+  const fr = storedFrameAt(st.t);
   const xs: number[] = [];
   const step = Math.max(1, Math.round(r.N / 500));
   for (let i = 0; i < r.N; i += step) xs.push((i + 0.5) * r.dx);
@@ -1349,7 +1386,7 @@ function drawAll() {
   if (!st.res) return;
   drawStrip();
   drawXt();
-  const fr = frameAt(st.t);
+  const fr = storedFrameAt(st.t); // графики профилей обновляются по сохранённым кадрам — это дорого
   if (fr.t !== lastProfileT) {
     lastProfileT = fr.t;
     renderProfiles();
