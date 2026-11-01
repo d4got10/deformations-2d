@@ -73,6 +73,15 @@ export interface FrontsProblem {
   passRatio?: number;
   /** Предел числа событий. */
   maxEvents?: number;
+  /**
+   * Считать «до затухания»: пока возможна хоть одна встреча фронтов или отражение от границы
+   * (tEnd тогда определяется автоматически, обрезки по x нет).
+   */
+  untilQuiet?: boolean;
+  /** Внутреннее: остановиться, как только взаимодействия закончились. */
+  stopWhenQuiet?: boolean;
+  /** Горизонт режима «до затухания» (в единицах L/c1), по умолчанию 10. */
+  maxTime?: number;
 }
 
 export interface FrontsFrame {
@@ -103,6 +112,17 @@ export interface FrontsResult {
   fallbacks: number;
   /** Расчёт пришлось повторить с грубыми порогами (см. trackFronts). */
   coarsened?: boolean;
+  /** Конечное время расчёта и длина участка, на котором находятся все фронты к этому моменту. */
+  tEnd: number;
+  xView: number;
+  /** Момент, после которого фронты больше не встречаются (если считали «до затухания»). */
+  tQuiet?: number;
+  /** Встречи, не решённые даже запасными путями и обработанные линейным наложением. */
+  linearPasses: number;
+  /** Когда случилась бы ближайшая ещё возможная встреча после окончания расчёта (Infinity — таких нет). */
+  nextInteraction: number;
+  /** «До затухания» упёрлось в горизонт: остались далёкие встречи. */
+  horizonReached?: boolean;
 }
 
 // ---------------------------------------------------------------- механика фронтов
@@ -437,11 +457,27 @@ const strengthOf = (a: State, b: State) => Math.hypot(b.F[0] - a.F[0], b.F[1] - 
  * порогами (1e-7 и 1e2) — это отмечается в результате (coarsened).
  */
 export function trackFronts(prob: FrontsProblem): FrontsResult {
-  const fine = trackOnce({ ...prob, maxEvents: prob.maxEvents ?? 1500 });
+  const fine = runMode({ ...prob, maxEvents: prob.maxEvents ?? 1500 });
   if (fine.events < (prob.maxEvents ?? 1500) && fine.warnings.length === 0) return fine;
-  const coarse = trackOnce({ ...prob, dropTol: Math.max(prob.dropTol ?? 0, 1e-7), passRatio: Math.max(prob.passRatio ?? 0, 1e-2), maxEvents: 20000 });
+  const coarse = runMode({ ...prob, dropTol: Math.max(prob.dropTol ?? 0, 1e-7), passRatio: Math.max(prob.passRatio ?? 0, 1e-2), maxEvents: 20000 });
   coarse.coarsened = true;
   return coarse;
+}
+
+/** «До затухания»: пробный проход находит момент последней встречи, затем — расчёт до него с кадрами. */
+function runMode(prob: FrontsProblem): FrontsResult {
+  if (!prob.untilQuiet) return trackOnce(prob);
+  const lastChange = Math.max(0, ...prob.pulses.map((p) => p.start + p.duration));
+  const horizon = Math.max(prob.maxTime ?? 10, lastChange * 1.2);
+  const probe = trackOnce({ ...prob, tEnd: horizon, frames: 2, xMax: Infinity, stopWhenQuiet: true });
+  if (probe.warnings.length) return probe;
+  const reached = probe.tQuiet === undefined;
+  const tq = Math.max(probe.tQuiet ?? horizon, lastChange);
+  const tEnd = reached ? horizon : Math.max(0.3, tq * 1.1, lastChange * 1.15);
+  const res = trackOnce({ ...prob, tEnd, xMax: Infinity, untilQuiet: false });
+  res.tQuiet = reached ? undefined : tq;
+  res.horizonReached = reached;
+  return res;
 }
 
 function trackOnce(prob: FrontsProblem): FrontsResult {
@@ -463,6 +499,7 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
   let merges = 0;
   let absorbed = 0;
   let fallbacks = 0;
+  let linearPasses = 0;
   const passRatio = prob.passRatio ?? 1e-5;
   let mergeResidual = 0;
   let work = 0;
@@ -577,6 +614,7 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
   };
 
   const maxEvents = prob.maxEvents ?? 20000;
+  let tQuiet: number | undefined;
   while (t < prob.tEnd - 1e-13 && events < maxEvents) {
     // ближайшее событие
     let tNext = prob.tEnd;
@@ -611,6 +649,14 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
         kind = 'hit';
       }
     }
+    if (prob.stopWhenQuiet && (kind === 'frame' || kind === 'end')) {
+      // ни встреч, ни отражений, ни новых воздействий впереди — взаимодействия закончились
+      const pendingBc = changes.some((b) => b > t + 1e-13 || (b >= t - 1e-13 && !appliedBc.has(b)));
+      if (!pendingBc) {
+        tQuiet = t;
+        break;
+      }
+    }
     advance(Math.max(0, tNext - t));
     if (kind === 'frame' || Math.abs(t - tFrame) < 1e-13) {
       if (nextFrame < nF) {
@@ -629,6 +675,7 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
       closeSeg(a, t);
       closeSeg(b, t);
       const l = states[which];
+      const m0 = states[which + 1];
       const r = states[which + 2];
       // Встреча сильного фронта с крошечным (в 1e5 раз слабее): сильный проходит насквозь, слабый
       // поглощается (ошибка в балансах ~ скачку слабого). Задача о распаде разрыва для таких пар плохо
@@ -660,10 +707,14 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
         continue;
       }
       if (!rp) {
-        warnings.push(`t = ${t.toFixed(4)}: распад разрыва не решён — расчёт остановлен`);
-        states.splice(which + 1, 0, r);
-        fronts.splice(which, 0, { x, speed: 0, fam: 'fast', kind: 'shock', born: t, xBorn: x, strength: strengthOf(l, r) });
-        break;
+        // последний запасной путь: волны проходят друг сквозь друга по линейному наложению
+        // (новое среднее состояние = l + (r − m)); точно в линейной теории, ошибка ~ нелинейность × амплитуды
+        const mid = { F: [l.F[0] + r.F[0] - m0.F[0], l.F[1] + r.F[1] - m0.F[1]] as V2, v: [l.v[0] + r.v[0] - m0.v[0], l.v[1] + r.v[1] - m0.v[1]] as V2 };
+        states.splice(which + 1, 0, mid, r);
+        fronts.splice(which, 0, { ...b, x, born: t, xBorn: x, strength: strengthOf(l, mid) }, { ...a, x, born: t, xBorn: x, strength: strengthOf(mid, r) });
+        linearPasses++;
+        events++;
+        continue;
       }
       // слева направо: быстрая влево (от переднего к заднему фронту), медленная влево, медленная вправо (от заднего к переднему), быстрая вправо
       const seq: { G: number; behind: State; kind: 'shock' | 'simple'; fam: Fam }[] = [];
@@ -697,22 +748,30 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
   for (const f of fronts) closeSeg(f, t);
   while (frames.length < nF) snapshot();
 
-  // кинематический баланс: ∫(p − p0)dx + ∫v*dt (по последнему кадру, интеграл до xMax)
+  // кинематический баланс: ∫(p − p0)dx + ∫v*dt (по последнему кадру; за последним фронтом — исходное состояние)
   const last = frames.at(-1)!;
+  const xEndInt = Number.isFinite(xMax) ? xMax : (last.xs.at(-1) ?? 0) + 1;
   let kin = 0;
   for (let i = 0; i < last.states.length; i++) {
     const xa = i === 0 ? 0 : last.xs[i - 1];
-    const xb = i < last.xs.length ? last.xs[i] : xMax;
+    const xb = i < last.xs.length ? last.xs[i] : xEndInt;
     kin += (last.states[i].F[0] - F0[0]) * (xb - xa);
   }
   let en = 0;
   for (let i = 0; i < last.states.length; i++) {
     const xa = i === 0 ? 0 : last.xs[i - 1];
-    const xb = i < last.xs.length ? last.xs[i] : xMax;
+    const xb = i < last.xs.length ? last.xs[i] : xEndInt;
     const s = last.states[i];
     en += (energy1d(c.m, [s.F[0], 0, s.F[1]]) - W0 + 0.5 * (s.v[0] ** 2 + s.v[1] ** 2)) * (xb - xa);
   }
-  return { frames, segments, events, maxFronts, warnings, kinematicError: kin + last.ub, work, energyGain: en, dissipation, merges, mergeResidual, absorbed, fallbacks };
+  // ближайшая ещё возможная встреча/отражение после окончания расчёта
+  let nextInteraction = Infinity;
+  for (let i = 0; i + 1 < fronts.length; i++)
+    if (fronts[i].speed > fronts[i + 1].speed + 1e-12) nextInteraction = Math.min(nextInteraction, t + Math.max(0, fronts[i + 1].x - fronts[i].x) / (fronts[i].speed - fronts[i + 1].speed));
+  if (fronts.length && fronts[0].speed < 0) nextInteraction = Math.min(nextInteraction, t + fronts[0].x / -fronts[0].speed);
+  const xFar = Math.max(0, ...segments.map((sg) => Math.max(sg.x0, sg.x1)));
+  const xView = Number.isFinite(xMax) ? Math.min(xMax, 1) : Math.max(1e-3, xFar * 1.04);
+  return { frames, segments, events, maxFronts, warnings, kinematicError: kin + last.ub, work, energyGain: en, dissipation, merges, mergeResidual, absorbed, fallbacks, linearPasses, nextInteraction, tEnd: t, xView, tQuiet };
 }
 
 /** Состояние в точке x кадра. */

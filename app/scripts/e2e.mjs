@@ -111,6 +111,12 @@ try {
     await page.waitForFunction(() => window.__series.computing === 0 && window.__series.res && window.__series.pulses.length === 1, null, { timeout: 60000 });
     await page.waitForTimeout(400);
     await page.click('#s-play');
+    // момент t = 0.5 — до окончания одиночного удара (там показывается точное решение §2.3)
+    await page.evaluate(() => {
+      const r = document.getElementById('s-time');
+      r.value = String(0.5 / window.__series.tEnd);
+      r.dispatchEvent(new Event('input'));
+    });
     await page.waitForTimeout(300);
     const dashed = await page.locator('#s-profiles polyline[stroke-dasharray="5 4"]').count();
     if (dashed < 4) fail(`нет точного решения на профилях: ${dashed}`);

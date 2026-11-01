@@ -172,3 +172,23 @@ describe('разные скорости сжатия и растяжения (м
     expect(e / 2).toBeLessThan(0.02 * 0.002);
   });
 });
+
+describe('режим «до затухания взаимодействий»', () => {
+  for (const [name, m, p0] of CASES) {
+    it(`${name}: расчёт идёт до последней встречи; в конце все фронты разбегаются`, () => {
+      const res = trackFronts({ material: m, F0: [p0, 0, 0.001], pulses: PULSES, tEnd: 0.92, frames: 60, untilQuiet: true });
+      expect(res.warnings).toEqual([]);
+      expect(res.horizonReached).toBe(false);
+      expect(res.tQuiet!).toBeGreaterThan(0.92); // фиксированного t = 0.92 было мало
+      expect(res.tEnd).toBeGreaterThanOrEqual(res.tQuiet!);
+      // последний кадр: скорости по возрастанию вглубь, к границе ничего не бежит
+      const end = res.segments.filter((sg) => Math.abs(sg.t1 - res.tEnd) < 1e-9).sort((a, b) => a.x1 - b.x1);
+      const speeds = end.map((sg) => (sg.x1 - sg.x0) / (sg.t1 - sg.t0));
+      expect(Math.min(...speeds)).toBeGreaterThanOrEqual(0);
+      // если какие-то фронты ещё сближаются, то так медленно, что встретятся лишь за горизонтом (t > 10)
+      expect(res.nextInteraction).toBeGreaterThan(10);
+      expect(res.xView).toBeGreaterThan(1);
+      expect(Math.abs(res.kinematicError)).toBeLessThan(1e-8);
+    });
+  }
+});

@@ -65,7 +65,14 @@ const st = {
   F0: [...MATERIALS[matNames[0]].F0] as Vec3,
   pulses: PULSE_PRESETS['Три одинаковых удара'].map((p) => ({ ...p })),
   N: 800,
+  /** Время показа (для метода фронтов «до затухания» определяется расчётом). */
   tEnd: 0.92,
+  /** Время расчёта по умолчанию (конечные объёмы и метод фронтов без «до затухания»). */
+  tBase: 0.92,
+  /** Длина показанного участка в единицах L. */
+  xView: 1,
+  /** Метод фронтов: считать, пока фронты ещё могут встретиться. */
+  untilQuiet: true,
   field: 'p' as FieldKey,
   magnify: 100,
   /** Увеличение поперечных (сдвиговых) перемещений — при нормальном ударе они в сотни раз меньше. */
@@ -211,6 +218,18 @@ function buildControls() {
     schedule();
   });
   row(fsN, 'Метод', msel, 's-method');
+  const ql = document.createElement('label');
+  ql.className = 'check';
+  const qcb = document.createElement('input');
+  qcb.type = 'checkbox';
+  qcb.id = 's-until-quiet';
+  qcb.checked = st.untilQuiet;
+  qcb.addEventListener('change', () => {
+    st.untilQuiet = qcb.checked;
+    schedule();
+  });
+  ql.append(qcb, 'считать, пока фронты могут встретиться (метод фронтов)');
+  fsN.appendChild(ql);
   const fl = document.createElement('label');
   fl.className = 'check';
   const fcb = document.createElement('input');
@@ -349,7 +368,7 @@ function schedule() {
 }
 
 function problem(): SeriesProblem {
-  return { material: normalize(st.material), F0: [...st.F0] as Vec3, pulses: st.pulses.map((p) => ({ ...p })), N: st.N, tEnd: st.tEnd, frames: 240 };
+  return { material: normalize(st.material), F0: [...st.F0] as Vec3, pulses: st.pulses.map((p) => ({ ...p })), N: st.N, tEnd: st.tBase, frames: 240 };
 }
 
 async function compute() {
@@ -367,6 +386,9 @@ async function compute() {
     if (id !== reqId) return;
     st.res = res;
     st.fronts = fronts;
+    st.tEnd = fronts ? fronts.tEnd : st.tBase;
+    st.xView = fronts ? fronts.xView : 1;
+    st.t = Math.min(st.t, st.tEnd);
     st.ms = ms;
     st.computing = 0;
     autoMagnify();
@@ -393,14 +415,14 @@ async function compute() {
         renderStatus();
       }
     };
-    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames } });
+    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames, untilQuiet: st.untilQuiet } });
     else worker.postMessage({ id, method: 'fv', prob });
   } catch {
     // запасной путь — в основном потоке
     const t0 = performance.now();
     if (st.method === 'fronts') {
       const { trackFronts } = await import('../core/fronts.ts');
-      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames });
+      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames, untilQuiet: st.untilQuiet });
       done(framesFromFronts(fr), performance.now() - t0, fr);
     } else {
       const { simulate } = await import('../core/fv1d.ts');
@@ -412,7 +434,7 @@ async function compute() {
 /** Перевести кусочно-постоянное решение метода фронтов в кадры на сетке (для общих графиков). */
 function framesFromFronts(fr: FrontsResult): SeriesResult {
   const N = 1000;
-  const dx = 1 / N;
+  const dx = fr.xView / N;
   const frames = fr.frames.map((f) => {
     const U = new Float32Array(6 * N);
     for (let i = 0; i < N; i++) {
@@ -473,6 +495,17 @@ function renderStatus() {
         `На каждом фронте точно выполнены условия на разрывах (2.40)–(2.42); простые волны представлены пучками слабых фронтов. ` +
         `Кинематический баланс ${fr.kinematicError.toExponential(1)}. Энергия: работа границы ${fmt(fr.work, 4)} = прирост энергии ${fmt(fr.energyGain, 4)} + диссипация на ударных фронтах (2.45) ${fmt(fr.dissipation, 3)} (расхождение ${(fr.work - fr.energyGain - fr.dissipation).toExponential(1)}).`,
     );
+    if (st.untilQuiet) {
+      const far = Number.isFinite(fr.nextInteraction) && fr.nextInteraction < 1e3;
+      add(
+        'info',
+        fr.horizonReached
+          ? `Расчёт до горизонта t = ${fmt(fr.tEnd, 3)}: взаимодействия ещё продолжаются.`
+          : `Последняя встреча фронтов — при t c1/L ≈ ${fmt(fr.tQuiet ?? fr.tEnd, 3)}; дальше все фронты разбегаются (каждый следующий не медленнее предыдущего), к границе ничего не бежит. Показан участок до x1/L ≈ ${fmt(fr.xView, 3)}.` +
+            (far ? ` За горизонтом (t = 10) осталась далёкая встреча почти параллельных фронтов при t ≈ ${fmt(fr.nextInteraction, 3)}.` : ''),
+      );
+    }
+    if (fr.linearPasses) add('warn', `${fr.linearPasses} встреч(а) не решены точно и обработаны линейным наложением волн (ошибка ~ нелинейность × амплитуды).`);
     if (fr.coarsened)
       add(
         'warn',
@@ -507,6 +540,16 @@ function frameAt(t: number) {
   const r = st.res!;
   const k = Math.max(0, Math.min(r.frames.length - 1, Math.round((t / st.tEnd) * (r.frames.length - 1))));
   return r.frames[k];
+}
+
+/** Круглые деления оси от 0 до max (4–6 штук). */
+function axisTicks(max: number): number[] {
+  const raw = max / 5;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((k) => k * mag).find((v) => v >= raw) ?? raw;
+  const out: number[] = [];
+  for (let v = 0; v <= max + 1e-9; v += step) out.push(+v.toPrecision(10));
+  return out;
 }
 
 function parseColor(c: string): [number, number, number] {
@@ -582,7 +625,7 @@ function drawXt() {
   }
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(heatCache.img, m.l, m.t, w - m.l - m.r, h - m.t - m.b);
-  const X = (x: number) => m.l + x * (w - m.l - m.r);
+  const X = (x: number) => m.l + (x / st.xView) * (w - m.l - m.r);
   const Y = (t: number) => h - m.b - (t / st.tEnd) * (h - m.t - m.b);
   ctx.strokeStyle = css('--border');
   ctx.strokeRect(m.l, m.t, w - m.l - m.r, h - m.t - m.b);
@@ -591,8 +634,8 @@ function drawXt() {
   ctx.fillText(`Диаграмма x–t: ${FIELD_LABELS[st.field]}`, 10, 16);
   ctx.font = '11px system-ui, sans-serif';
   ctx.fillStyle = css('--muted');
-  for (const t of [0, 0.2, 0.4, 0.6, 0.8]) if (t <= st.tEnd) ctx.fillText(t.toFixed(1), 14, Y(t) + 4);
-  for (const x of [0, 0.25, 0.5, 0.75, 1]) ctx.fillText(x.toFixed(2), X(x) - 10, h - m.b + 14);
+  for (const t of axisTicks(st.tEnd)) ctx.fillText(fmt(t, 2), 14, Y(t) + 4);
+  for (const x of axisTicks(st.xView)) ctx.fillText(fmt(x, 2), X(x) - 10, h - m.b + 14);
   ctx.fillText('x1 / L', w - m.r - 34, h - 6);
   ctx.save();
   ctx.translate(12, (m.t + h - m.b) / 2 + 30);
@@ -691,7 +734,7 @@ function drawStrip() {
   const N = r.N;
   const left = 70;
   const right = 14;
-  const sc = (w - left - right) / 1.0;
+  const sc = (w - left - right) / st.xView;
   const top = 34;
   const bottom = 48; // место под переключатель вида
   const half = (h - top - bottom) / 2 / sc;
@@ -810,21 +853,23 @@ function render3d(fr: SeriesResult['frames'][number], du1: Float64Array, du3: Fl
   const step = Math.max(1, Math.round(N / 400));
   const Xs: number[] = [];
   const D: Vec3[] = [];
+  // 3D-брусок нормирован на длину показанного участка: X ∈ [0, 1]
+  const L = st.xView;
   for (let i = 0; i <= N; i += step) {
-    Xs.push(i * r.dx);
-    D.push([du1[i], 0, du3[i]]);
+    Xs.push((i * r.dx) / L);
+    D.push([du1[i] / L, 0, du3[i] / L]);
   }
   if (Xs.at(-1)! < 1) {
     Xs.push(1);
-    D.push([du1[N], 0, du3[N]]);
+    D.push([du1[N] / L, 0, du3[N] / L]);
   }
   const disp = (X: number): Vec3 => {
-    const i = Math.max(0, Math.min(N, Math.round(X / r.dx)));
-    return [du1[i], 0, du3[i]];
+    const i = Math.max(0, Math.min(N, Math.round((X * L) / r.dx)));
+    return [du1[i] / L, 0, du3[i] / L];
   };
   const base = parseColor(css('--panel'));
   const colorAt = (X: number) => {
-    const i = Math.max(0, Math.min(N - 1, Math.floor(X / r.dx)));
+    const i = Math.max(0, Math.min(N - 1, Math.floor((X * L) / r.dx)));
     const c = cell(fr, N, i);
     const [R, G, B] = diverging(fieldOf(c.F, c.v) / fieldMax, base);
     return `rgb(${R},${G},${B})`;
@@ -903,7 +948,7 @@ function renderProfiles() {
       });
       series.push({ label: 'точное (§2.3)', x: xs, y: ey, color: muted, dash: '5 4' });
     }
-    const chart = lineChart({ xLabel: 'x1 / L', yLabel: title, series, allowNegative: true, height: 230, width: 520, xRange: [0, 1] });
+    const chart = lineChart({ xLabel: 'x1 / L', yLabel: title, series, allowNegative: true, height: 230, width: 520, xRange: [0, st.xView] });
     box.appendChild(chart);
   }
 }
