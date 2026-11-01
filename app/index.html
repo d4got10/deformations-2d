@@ -3,33 +3,66 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Подвижная нагрузка — разномодульная среда</title>
+    <title>Разномодульная среда: удары и волны</title>
     <link rel="stylesheet" href="./src/ui/style.css" />
   </head>
   <body>
     <header>
-      <h1>Подвижная нагрузка на границе разномодульного полупространства</h1>
+      <h1>Ударные волны в разномодульной упругой среде</h1>
       <p class="sub">
-        Автомодельная задача §3.2 диссертации О.В. Дудко (1998): модель Мясникова–Олейникова, две плоские ударные волны
-        Σ1 (квазипродольная) и Σ2 (квазипоперечная).
+        По мотивам диссертации О.В. Дудко «Динамика разномодульной изотропной упругой среды при ударных воздействиях» (1998),
+        модель Мясникова–Олейникова.
       </p>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-impact" data-page="impact" aria-selected="true">Удар по границе (глава 2)</button>
+        <button role="tab" id="tab-load" data-page="load" aria-selected="false">Подвижная нагрузка (§3.2)</button>
+      </nav>
     </header>
-    <main>
-      <aside id="controls"></aside>
-      <section id="view">
-        <div class="scene-wrap">
-          <canvas id="scene" aria-label="Деформированное полупространство"></canvas>
-          <div id="legend"></div>
-        </div>
-        <div id="status"></div>
-        <div id="results"></div>
-        <h2>Скачки по зонам (как рис. 21)</h2>
-        <div id="steps" class="steps"></div>
-        <h2>Зависимость углов фронтов от параметра (как рис. 22, 24)</h2>
-        <div id="sweep-controls"></div>
-        <div id="sweep"></div>
-      </section>
-    </main>
-    <script type="module" src="./src/ui/main.ts"></script>
+
+    <!-- Глава 2 -->
+    <div id="page-impact" class="page" role="tabpanel">
+      <main>
+        <aside id="i-controls"></aside>
+        <section>
+          <div class="scene-grid">
+            <div class="scene-wrap">
+              <canvas id="i-scene" class="tall" aria-label="Деформированное полупространство в двух сечениях"></canvas>
+              <div id="i-legend" class="legend"></div>
+            </div>
+            <div class="scene-wrap">
+              <canvas id="i-xt" class="tall" aria-label="Диаграмма x–t"></canvas>
+            </div>
+          </div>
+          <div id="i-status"></div>
+          <div id="i-results"></div>
+          <h2>Профили по автомодельной переменной ξ = x1/(c1 t) (как рис. 11, 13, 16, 18)</h2>
+          <div id="i-profiles" class="steps"></div>
+          <h2>Скорости волн в зависимости от граничного воздействия (как рис. 12, 14)</h2>
+          <div id="i-sweep-controls" class="sweep-controls"></div>
+          <div id="i-sweep" class="sweep-pair"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- §3.2 -->
+    <div id="page-load" class="page" role="tabpanel" hidden>
+      <main>
+        <aside id="controls"></aside>
+        <section id="view">
+          <div class="scene-wrap">
+            <canvas id="scene" aria-label="Деформированное полупространство"></canvas>
+            <div id="legend" class="legend"></div>
+          </div>
+          <div id="status"></div>
+          <div id="results"></div>
+          <h2>Скачки по зонам (как рис. 21)</h2>
+          <div id="steps" class="steps"></div>
+          <h2>Зависимость углов фронтов от параметра (как рис. 22, 24)</h2>
+          <div id="sweep-controls" class="sweep-controls"></div>
+          <div id="sweep"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./src/ui/app.ts"></script>
   </body>
 </html>

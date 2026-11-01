@@ -32,6 +32,34 @@ try {
     page.on('console', (m) => m.type() === 'error' && fail(`console: ${m.text()}`));
     page.on('pageerror', (e) => fail(`pageerror: ${e.message}`));
     await page.goto(`http://localhost:${port}/`);
+
+    // ---------- Глава 2 (вкладка по умолчанию) ----------
+    await page.waitForFunction(() => window.__impact?.sol);
+    const ch2 = await page.evaluate(() => window.__impact.sol.waves.map((w) => w.xiFront));
+    if (Math.abs(ch2[0] - 1.00697) > 1e-4 || Math.abs(ch2[1] - 0.56712) > 1e-4) fail(`§2.3, материал 1: ${ch2}`);
+    if ((await page.locator('#i-profiles .chart').count()) !== 9) fail('профилей по ξ должно быть 9');
+    await page.click('#i-play');
+    await page.fill('#i-in-tau', '0.8');
+    await page.dispatchEvent('#i-in-tau', 'change');
+    await page.waitForSelector('#i-sweep svg polyline');
+    await page.screenshot({ path: `${outDir}/ch2-normal-${scheme}.png`, fullPage: true });
+    // §2.4.2 с веером
+    await page.selectOption('#i-preset', { index: 4 });
+    await page.waitForTimeout(300);
+    const kinds = await page.evaluate(() => window.__impact.sol.waves.map((w) => w.kind).join(','));
+    if (kinds !== 'shock,rotation,fan') fail(`§2.4.2: структура волн ${kinds}`);
+    await page.selectOption('#i-field', 'g');
+    await page.fill('#i-in-tau', '0.8');
+    await page.dispatchEvent('#i-in-tau', 'change');
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: `${outDir}/ch2-oblique-${scheme}.png`, fullPage: false });
+    // переключение типа удара
+    await page.click('#i-bc-velocity');
+    await page.waitForTimeout(300);
+    if (!(await page.evaluate(() => window.__impact.sol?.problem.bc.type === 'velocity'))) fail('переключение на нормальный удар');
+
+    // ---------- §3.2 ----------
+    await page.click('#tab-load');
     await page.waitForFunction(() => window.__app?.solution);
     const th = await page.evaluate(() => window.__app.solution.fronts.map((f) => f.thetaDeg));
     if (Math.abs(th[0] - 36.366) > 0.01 || Math.abs(th[1] - 19.49) > 0.01) fail(`углы материала 1: ${th}`);

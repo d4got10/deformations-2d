@@ -117,7 +117,7 @@ aside legend {
 }
 .row {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr) 84px;
+  grid-template-columns: 74px minmax(0, 1fr) 94px;
   align-items: center;
   gap: 6px;
   margin: 4px 0;
@@ -184,7 +184,7 @@ canvas#scene {
   width: 100%;
   height: min(62vh, 560px);
 }
-#legend {
+.legend {
   position: absolute;
   right: 10px;
   bottom: 10px;
@@ -195,10 +195,10 @@ canvas#scene {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
-#legend:empty {
+.legend:empty {
   display: none;
 }
-#legend .sw {
+.legend .sw {
   display: inline-block;
   width: 12px;
   height: 12px;
@@ -207,17 +207,20 @@ canvas#scene {
   vertical-align: -2px;
   border: 1px solid var(--border);
 }
-#status .msg {
+#status .msg,
+#i-status .msg {
   margin: 10px 0 0;
   padding: 8px 10px;
   border-radius: 8px;
   font-size: 13px;
 }
-#status .warn {
+#status .warn,
+#i-status .warn {
   background: var(--warn-bg);
   color: var(--warn-text);
 }
-#status .err {
+#status .err,
+#i-status .err {
   background: var(--err-bg);
   color: var(--err-text);
 }
@@ -292,7 +295,7 @@ td.bad {
   stroke: var(--muted);
   stroke-dasharray: 2 3;
 }
-#sweep-controls {
+.sweep-controls {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -326,4 +329,75 @@ td.bad {
   border: none;
   border-radius: 50%;
   background: currentColor;
+}
+
+/* Вкладки и страница главы 2 */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.tabs button {
+  border-radius: 999px;
+  padding: 6px 14px;
+}
+.tabs button[aria-selected='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.page[hidden] {
+  display: none;
+}
+.scene-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr);
+  gap: 12px;
+}
+@media (max-width: 1100px) {
+  .scene-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+canvas.tall {
+  display: block;
+  width: 100%;
+  height: min(70vh, 600px);
+}
+#i-xt.tall {
+  height: min(70vh, 600px);
+}
+@media (max-width: 1100px) {
+  #i-xt.tall {
+    height: 300px;
+  }
+}
+#i-status .msg.info {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.sweep-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+.seg {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+.seg button {
+  flex: 1;
+  font-size: 13px;
+}
+.seg button[aria-pressed='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.row input[type='range'] {
+  width: 100%;
+  min-width: 0;
 }

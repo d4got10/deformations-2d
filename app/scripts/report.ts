@@ -4,7 +4,9 @@
  */
 import { type MovingLoadProblem, type MovingLoadSolution, solveMovingLoad, sweep } from '../src/core/movingLoad.ts';
 import { c2OverC1, scaleNonlinear } from '../src/core/material.ts';
-import { BASE_CASE, DISSERTATION, LOAD_SWEEP_CASE, MATERIAL_1, MATERIAL_2 } from '../src/core/presets.ts';
+import { BASE_CASE, DISSERTATION, DISSERTATION_CH2, IMPACT_PRESETS, LOAD_SWEEP_CASE, MATERIAL_1, MATERIAL_2 } from '../src/core/presets.ts';
+import { conservationCheck, solveImpact } from '../src/core/impact.ts';
+import { normalize } from '../src/core/material.ts';
 
 const out: string[] = [];
 const p = (s = '') => out.push(s);
@@ -19,6 +21,49 @@ const range = (from: number, to: number, step: number) => {
 p('# Результаты сверки с диссертацией (сгенерировано `npm run report`)');
 p();
 p(`Дата генерации: ${new Date().toISOString().slice(0, 10)}. Методика — в [VERIFICATION.md](VERIFICATION.md).`);
+p();
+p('# Глава 2. Удар по границе');
+p();
+p('## 2.1. Скорости волн по всем случаям');
+p();
+p('| Случай | Структура | Расчёт: ξ = G/c1 | Диссертация | Допустимость | Законы сохранения (макс. отн. погрешность) |');
+p('|---|---|---|---|---|---|');
+const refCh2: Record<string, string> = {
+  '§2.3 нормальный удар, материал 1 (рис. 11)': `Σ1 ${DISSERTATION_CH2.fig11.xi1}, Σ2 ${DISSERTATION_CH2.fig11.xi2}`,
+  '§2.3 нормальный удар, материал 2 (рис. 13)': `Σ1 ${DISSERTATION_CH2.fig13.xi1}, Σ2 ${DISSERTATION_CH2.fig13.xi2}`,
+  '§2.4.1 косой удар, материал 1 (рис. 16)': `Σ1 ${DISSERTATION_CH2.fig16text.xi1} / ${DISSERTATION_CH2.fig16figure.xi1}, Σ2 ${DISSERTATION_CH2.fig16text.xi2} / ${DISSERTATION_CH2.fig16figure.xi2}, Σ3 ${DISSERTATION_CH2.fig16text.xi3} / ${DISSERTATION_CH2.fig16figure.xi3} (текст / рисунок)`,
+  '§2.4.2 косой удар, материал 2 (рис. 18)': `Σ1 ${DISSERTATION_CH2.fig18.xi1}, Σ3 ${DISSERTATION_CH2.fig18.xi3}, веер ${DISSERTATION_CH2.fig18.fanFront}…${DISSERTATION_CH2.fig18.fanBack}`,
+  '§2.4.2, материал 2 с β = +0.3 (гипотеза)': `Σ1 ${DISSERTATION_CH2.fig18.xi1}, Σ3 ${DISSERTATION_CH2.fig18.xi3}, веер ${DISSERTATION_CH2.fig18.fanFront}…${DISSERTATION_CH2.fig18.fanBack}`,
+};
+for (const [name, pr] of Object.entries(IMPACT_PRESETS)) {
+  for (const law of ['model', 'printed229'] as const) {
+    const sol = solveImpact({ material: normalize(pr.material), F0: pr.F0, bc: pr.bc, stressLaw: law });
+    if (!sol) {
+      p(`| ${name}${law === 'printed229' ? ' — по напечатанной (2.29)' : ''} | нет решения | | ${refCh2[name]} | | |`);
+      continue;
+    }
+    const struct = sol.waves.map((w) => (w.kind === 'fan' ? 'веер' : w.label)).join(' → ');
+    const speeds = sol.waves.map((w) => (w.kind === 'fan' ? `веер ${f(w.xiFront)}…${f(w.xiBack)}` : `${w.label} ${f(w.xiFront)}`)).join(', ');
+    const c = conservationCheck(sol);
+    const rel = (a: number[], b: number[]) => Math.max(...a.map((v, i) => Math.abs(v - b[i]))) / Math.max(...b.map(Math.abs), 1e-30);
+    const err = Math.max(rel(c.kinematic.lhs, c.kinematic.rhs), rel(c.momentum.lhs, c.momentum.rhs), Math.abs(c.energy.lhs - c.energy.rhs) / Math.abs(c.energy.rhs));
+    p(`| ${name}${law === 'printed229' ? ' — **по напечатанной (2.29)**' : ''} | ${struct} | ${speeds} | ${refCh2[name]} | ${sol.warnings.length ? '**нет**: ' + sol.warnings.join(' ') : 'да'} | ${err.toExponential(1)} |`);
+  }
+}
+p();
+p('## 2.2. Зависимость от скорости удара d2 (рис. 12д,е и 14д,е)');
+p();
+p('| d2 | Мат. 1: M1 | Мат. 1: M2 | Мат. 2: M1 | Мат. 2: M2 |');
+p('|---|---|---|---|---|');
+for (const d of [0.001, 0.002, 0.004, 0.006, 0.008, 0.01]) {
+  const a = solveImpact({ material: normalize(MATERIAL_1), F0: [-0.00005, 0, 0.001], bc: { type: 'velocity', d } })!;
+  const b = solveImpact({ material: normalize(MATERIAL_2), F0: [-0.005, 0, 0.001], bc: { type: 'velocity', d } })!;
+  p(`| ${d} | ${f(a.waves[0].xiFront, 5)} | ${f(a.waves[1].xiFront, 5)} | ${f(b.waves[0].xiFront, 5)} | ${f(b.waves[1].xiFront, 5)} |`);
+}
+p();
+p(`Диссертация (диапазоны осей): материал 1 — M1 ∈ [${DISSERTATION_CH2.fig12.M1}] с максимумом внутри интервала, M2 ∈ [${DISSERTATION_CH2.fig12.M2}] убывает; материал 2 — M1 ∈ [${DISSERTATION_CH2.fig14.M1}], M2 ∈ [${DISSERTATION_CH2.fig14.M2}], обе растут.`);
+p();
+p('# Глава 3. Подвижная нагрузка (§3.2)');
 p();
 
 const cases: [string, typeof MATERIAL_1, { G1: number; G2: number; theta1: number; theta2: number }][] = [

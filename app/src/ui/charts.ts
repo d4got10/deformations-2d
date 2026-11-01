@@ -9,6 +9,15 @@ function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, 
   return e;
 }
 
+/** Подпись деления с числом знаков, достаточным для шага сетки. */
+function tickLabel(v: number, ticks: number[]): string {
+  const step = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : Math.abs(v) || 1;
+  const a = Math.max(...ticks.map(Math.abs));
+  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v === 0 ? '0' : v.toExponential(Math.max(0, Math.ceil(-Math.log10(step / a))));
+  const dec = Math.max(0, Math.ceil(-Math.log10(step) - 1e-9));
+  return v.toFixed(dec);
+}
+
 function niceTicks(min: number, max: number, count = 4): number[] {
   if (min === max) {
     const d = Math.abs(min) || 1;
@@ -51,9 +60,10 @@ export function stepChart(title: string, values: [number, number, number], xi1: 
   ymax += pad;
   const X = (x: number) => m.l + (x / xmax) * (W - m.l - m.r);
   const Y = (y: number) => m.t + ((ymax - y) / (ymax - ymin)) * (H - m.t - m.b);
-  for (const t of niceTicks(ymin, ymax, 3)) {
+  const ticksY = niceTicks(ymin, ymax, 3);
+  for (const t of ticksY) {
     el('line', { x1: m.l - 3, x2: m.l, y1: Y(t), y2: Y(t), class: 'axis' }, svg);
-    el('text', { x: m.l - 5, y: Y(t) + 3.5, 'text-anchor': 'end' }, svg).textContent = fmt(t, 2);
+    el('text', { x: m.l - 5, y: Y(t) + 3.5, 'text-anchor': 'end' }, svg).textContent = tickLabel(t, ticksY);
   }
   el('line', { x1: m.l, x2: m.l, y1: m.t, y2: H - m.b, class: 'axis' }, svg);
   el('line', { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), class: 'zero' }, svg);
@@ -111,10 +121,14 @@ export function lineChart(opts: {
   markers?: Marker[];
   vline?: number;
   xRange?: [number, number];
+  /** Разрешить отрицательные значения по оси Y (по умолчанию ось начинается не ниже 0). */
+  allowNegative?: boolean;
+  height?: number;
+  width?: number;
 }): HTMLElement {
-  const W = 720;
-  const H = 300;
-  const m = { l: 48, r: 14, t: 12, b: 38 };
+  const W = opts.width ?? 720;
+  const H = opts.height ?? 300;
+  const m = { l: 66, r: 14, t: 12, b: 38 };
   const box = document.createElement('div');
   box.className = 'chart';
   const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': opts.yLabel }, box);
@@ -128,17 +142,19 @@ export function lineChart(opts: {
   let y0 = Math.min(...ys);
   let y1 = Math.max(...ys);
   const pad = (y1 - y0 || 1) * 0.08;
-  y0 = Math.max(0, y0 - pad);
+  y0 = opts.allowNegative ? y0 - pad : Math.max(0, y0 - pad);
   y1 += pad;
   const X = (x: number) => m.l + ((x - x0) / (x1 - x0 || 1)) * (W - m.l - m.r);
   const Y = (y: number) => m.t + ((y1 - y) / (y1 - y0 || 1)) * (H - m.t - m.b);
-  for (const t of niceTicks(y0, y1, 6)) {
+  const ticksY = niceTicks(y0, y1, 6);
+  for (const t of ticksY) {
     el('line', { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), class: 'axis', 'stroke-opacity': 0.5 }, svg);
-    el('text', { x: m.l - 6, y: Y(t) + 4, 'text-anchor': 'end' }, svg).textContent = fmt(t, 3);
+    el('text', { x: m.l - 6, y: Y(t) + 4, 'text-anchor': 'end' }, svg).textContent = tickLabel(t, ticksY);
   }
-  for (const t of niceTicks(x0, x1, 8)) {
+  const ticksX = niceTicks(x0, x1, 8);
+  for (const t of ticksX) {
     el('line', { x1: X(t), x2: X(t), y1: H - m.b, y2: H - m.b + 4, class: 'axis' }, svg);
-    el('text', { x: X(t), y: H - m.b + 16, 'text-anchor': 'middle' }, svg).textContent = fmt(t, 3);
+    el('text', { x: X(t), y: H - m.b + 16, 'text-anchor': 'middle' }, svg).textContent = tickLabel(t, ticksX);
   }
   el('line', { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, class: 'axis' }, svg);
   el('text', { x: (m.l + W - m.r) / 2, y: H - 4, 'text-anchor': 'middle' }, svg).textContent = opts.xLabel;
@@ -203,5 +219,52 @@ export function lineChart(opts: {
     leg.appendChild(sp);
   }
   box.appendChild(leg);
+  return box;
+}
+
+/**
+ * Компактный профиль величины по ξ (как диаграммы рис. 11, 16, 18): кусочно-гладкая функция
+ * со скачками на ударных волнах; вертикальные метки — положения волн.
+ */
+export function profileChart(
+  title: string,
+  xs: number[],
+  ys: number[],
+  marks: { x: number; label: string; fan?: [number, number] }[],
+  color: string,
+): HTMLElement {
+  const W = 260;
+  const H = 130;
+  const m = { l: 60, r: 8, t: 20, b: 22 };
+  const box = document.createElement('div');
+  box.className = 'chart';
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': title }, box);
+  el('text', { x: 6, y: 13, class: 'title' }, svg).textContent = title;
+  const xmax = Math.max(...xs);
+  let ymin = Math.min(...ys);
+  let ymax = Math.max(...ys);
+  const span = ymax - ymin || Math.abs(ymax) || 1e-6;
+  ymin -= span * 0.15;
+  ymax += span * 0.15;
+  const X = (x: number) => m.l + (x / xmax) * (W - m.l - m.r);
+  const Y = (y: number) => m.t + ((ymax - y) / (ymax - ymin)) * (H - m.t - m.b);
+  for (const mk of marks) {
+    if (mk.fan) el('rect', { x: X(mk.fan[1]), y: m.t, width: Math.max(1, X(mk.fan[0]) - X(mk.fan[1])), height: H - m.t - m.b, fill: color, 'fill-opacity': 0.12 }, svg);
+    el('line', { x1: X(mk.x), x2: X(mk.x), y1: m.t, y2: H - m.b, class: 'zero' }, svg);
+  }
+  const labelled: number[] = [];
+  for (const mk of marks) {
+    if (labelled.some((x) => Math.abs(X(x) - X(mk.x)) < 22)) continue;
+    labelled.push(mk.x);
+    el('text', { x: X(mk.x), y: H - 7, 'text-anchor': 'middle' }, svg).textContent = mk.label;
+  }
+  const ticksY = niceTicks(ymin, ymax, 3);
+  for (const t of ticksY) {
+    el('line', { x1: m.l - 3, x2: m.l, y1: Y(t), y2: Y(t), class: 'axis' }, svg);
+    el('text', { x: m.l - 5, y: Y(t) + 3.5, 'text-anchor': 'end' }, svg).textContent = tickLabel(t, ticksY);
+  }
+  el('line', { x1: m.l, x2: m.l, y1: m.t, y2: H - m.b, class: 'axis' }, svg);
+  if (ymin < 0 && ymax > 0) el('line', { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), class: 'zero' }, svg);
+  el('polyline', { points: xs.map((x, i) => `${X(x)},${Y(ys[i])}`).join(' '), fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
   return box;
 }
