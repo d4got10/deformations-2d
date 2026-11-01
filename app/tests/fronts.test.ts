@@ -138,3 +138,37 @@ describe('растяжение границы (рывок наружу)', () => 
     expect(ex.warnings.some((w) => w.includes('составная волна'))).toBe(true);
   });
 });
+
+describe('разные скорости сжатия и растяжения (материал 2, слабое предсжатие)', () => {
+  const m = normalize(MATERIAL_2);
+  const F0 = [-0.0005, 0, 0.001] as [number, number, number];
+  const pulses = [
+    { start: 0, duration: 0.1, d: 0.002 },
+    { start: 0.3, duration: 0.1, d: -0.002 },
+  ];
+  const res = trackFronts({ material: m, F0, pulses, tEnd: 0.92, frames: 47 });
+
+  it('удар — ударная волна сжатия ≈ 1.07 c1, рывок — веер растяжения до ≈ 0.91 c1 (точный решатель)', () => {
+    const up = solveImpact({ material: m, F0, bc: { type: 'velocity', d: 0.002 } })!;
+    const down = solveImpact({ material: m, F0, bc: { type: 'velocity', d: -0.002 } })!;
+    expect(up.waves[0].kind).toBe('shock');
+    expect(up.waves[0].xiFront).toBeCloseTo(1.07, 2);
+    expect(down.waves[0].kind).toBe('fan');
+    expect(down.waves[0].xiBack).toBeCloseTo(0.914, 2);
+    expect(down.zones.at(-1)!.F[0]).toBeGreaterThan(0); // среда действительно растянута
+  });
+
+  it('метод фронтов отрабатывает сценарий без сбоев (при необходимости — с огрублёнными порогами)', () => {
+    expect(res.warnings).toEqual([]);
+    const fastSpeeds = res.segments.filter((sg) => sg.fam === 'fast' && sg.x1 > sg.x0 && sg.strength > 1e-5).map((sg) => (sg.x1 - sg.x0) / (sg.t1 - sg.t0));
+    expect(Math.max(...fastSpeeds)).toBeGreaterThan(1.06);
+    expect(Math.min(...fastSpeeds)).toBeLessThan(0.92);
+  });
+
+  it('конечные объёмы согласуются с решением методом фронтов', () => {
+    const fv = simulate({ material: m, F0, pulses, N: 1600, tEnd: 0.92, frames: 47 });
+    let e = 0;
+    for (const k of [23, 46]) for (let i = 0; i < 1600; i++) e += Math.abs(stateAt(res.frames[k], (i + 0.5) / 1600).F[0] - cell(fv.frames[k], 1600, i).F[0]) / 1600;
+    expect(e / 2).toBeLessThan(0.02 * 0.002);
+  });
+});

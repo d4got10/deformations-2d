@@ -99,6 +99,13 @@ try {
     await page.locator('#s-xt').screenshot({ path: `${outDir}/series-tension-weak-${scheme}.png` });
     await page.uncheck('#s-weak-fronts');
     await page.selectOption('#s-field', 'p');
+    // материал 2 со слабым предсжатием: сжатие и растяжение бегут с разной скоростью
+    await page.selectOption('#s-material', { index: 2 });
+    await page.selectOption('#s-pulse-preset', 'Удар, затем рывок (сравнить скорости сжатия и растяжения)');
+    await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts && window.__series.F0[0] === -0.0005 && window.__series.pulses.length === 2, null, { timeout: 90000 });
+    if (await page.evaluate(() => window.__series.fronts.warnings.length)) fail('материал 2, растяжение: предупреждения метода фронтов');
+    await page.locator('#s-xt').screenshot({ path: `${outDir}/series-m2-tension-${scheme}.png` });
+    await page.selectOption('#s-material', { index: 0 });
     // один удар: численное решение совпадает с точным (пунктир)
     await page.selectOption('#s-pulse-preset', 'Один удар (проверка по §2.3)');
     await page.waitForFunction(() => window.__series.computing === 0 && window.__series.res && window.__series.pulses.length === 1, null, { timeout: 60000 });

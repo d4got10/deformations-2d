@@ -23,6 +23,7 @@ import type { Material } from './material.ts';
 import { type Vec3, energy1d, traction } from './material1d.ts';
 import { solveLinear } from './newton.ts';
 import type { Pulse } from './fv1d.ts';
+import { solveImpact } from './impact.ts';
 import { boundaryVelocity } from './fv1d.ts';
 
 type V2 = [number, number];
@@ -68,6 +69,10 @@ export interface FrontsProblem {
   xMax?: number;
   /** Порог отбрасывания слабых фронтов (скачок деформации). */
   dropTol?: number;
+  /** Если на встрече один фронт слабее другого в 1/passRatio раз — сильный проходит насквозь. */
+  passRatio?: number;
+  /** Предел числа событий. */
+  maxEvents?: number;
 }
 
 export interface FrontsFrame {
@@ -92,6 +97,12 @@ export interface FrontsResult {
   /** Сколько раз фронты составной волны (невыпуклость) сливались при рождении, и наибольшая относительная невязка [T] − G²[F] у слитых фронтов. */
   merges: number;
   mergeResidual: number;
+  /** Сколько крошечных фронтов поглощено при встрече с сильными (в 1e5 раз и более). */
+  absorbed: number;
+  /** Сколько встреч не удалось решить и они обработаны как прохождение сильной волны сквозь слабую (≥100×). */
+  fallbacks: number;
+  /** Расчёт пришлось повторить с грубыми порогами (см. trackFronts). */
+  coarsened?: boolean;
 }
 
 // ---------------------------------------------------------------- механика фронтов
@@ -321,14 +332,53 @@ export function boundaryProblem(c: Ctx, a: State, d: number, fanStep: number): {
     [-B.cf * B.rf[1], -B.cs * B.rs[1]],
   ];
   const g = solveLinear(A, need) ?? [0, 0];
-  const sol = solveWithFans(
-    (e, n) => {
-      const { w2 } = run(e, n);
-      return [w2.behind.v[0] - d, w2.behind.v[1]];
-    },
-    g,
-    fanStep,
-  );
+  const solveFor = (target: V2, guess: number[]) =>
+    solveWithFans(
+      (e, n) => {
+        const { w2 } = run(e, n);
+        return [w2.behind.v[0] - target[0], w2.behind.v[1] - target[1]];
+      },
+      guess,
+      fanStep,
+    );
+  let sol = solveFor([d, 0], g);
+  if (!sol) {
+    // Продолжение по параметру: целевая скорость меняется от скорости среды (волн нет) до заданной.
+    // Нужно, когда волна проходит через сильно нелинейную область около p = 0.
+    let e = [0, 0];
+    let ok = true;
+    for (let k = 1; k <= 16 && ok; k++) {
+      const lam = k / 16;
+      const target: V2 = [(1 - lam) * a.v[0] + lam * d, (1 - lam) * a.v[1]];
+      const sk = solveFor(target, e);
+      if (!sk) ok = false;
+      else e = sk.e;
+    }
+    if (ok) sol = solveFor([d, 0], e);
+  }
+  if (!sol) {
+    // Начальное приближение из автомодельного решения главы 2 (impact.ts): амплитуды — проекции
+    // скачков между его зонами на собственные векторы семейств.
+    try {
+      const ex = solveImpact({ material: c.m, F0: [a.F[0], 0, a.F[1]], v0: [a.v[0], 0, a.v[1]], bc: { type: 'velocity', d } });
+      if (ex) {
+        const zs = ex.zones.map((z) => [z.F[0], z.F[2]] as V2);
+        const iFast = ex.waves.findIndex((w) => w.family === 'fast');
+        const iSlow = ex.waves.findIndex((w) => w.family === 'slow');
+        const proj = (i: number, fam: Fam) => {
+          if (i < 0) return 0;
+          const A0 = zs[i];
+          const B0 = zs[i + 1];
+          const r = orientedR(c, A0, fam).r;
+          const sgn = ex.waves[i].kind === 'fan' ? -1 : 1;
+          return sgn * Math.abs((B0[0] - A0[0]) * r[0] + (B0[1] - A0[1]) * r[1]);
+        };
+        sol = solveFor([d, 0], [proj(iFast, 'fast'), proj(iSlow, 'slow')]);
+      }
+    } catch {
+      /* остаётся null */
+    }
+  }
   if (!sol) return null;
   const { w1, w2 } = run(sol.e, sol.n);
   return { fast: w1, slow: w2 };
@@ -380,7 +430,21 @@ interface Tracked extends Front {
 
 const strengthOf = (a: State, b: State) => Math.hypot(b.F[0] - a.F[0], b.F[1] - a.F[1]);
 
+/**
+ * Отслеживание фронтов. Сначала — с точными порогами (слабые фронты от 1e-9, прохождение насквозь
+ * при разнице в 1e5 раз). Если событий слишком много (сильная нелинейность около p = 0 у материала 2
+ * порождает лавину сопоставимых отражений) или встреча не решается, расчёт повторяется с грубыми
+ * порогами (1e-7 и 1e2) — это отмечается в результате (coarsened).
+ */
 export function trackFronts(prob: FrontsProblem): FrontsResult {
+  const fine = trackOnce({ ...prob, maxEvents: prob.maxEvents ?? 1500 });
+  if (fine.events < (prob.maxEvents ?? 1500) && fine.warnings.length === 0) return fine;
+  const coarse = trackOnce({ ...prob, dropTol: Math.max(prob.dropTol ?? 0, 1e-7), passRatio: Math.max(prob.passRatio ?? 0, 1e-2), maxEvents: 20000 });
+  coarse.coarsened = true;
+  return coarse;
+}
+
+function trackOnce(prob: FrontsProblem): FrontsResult {
   const c: Ctx = { m: prob.material };
   const fanStep = prob.fanStep ?? 2.5e-4;
   const xMax = prob.xMax ?? 1.05;
@@ -397,6 +461,9 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
   let events = 0;
   let maxFronts = 0;
   let merges = 0;
+  let absorbed = 0;
+  let fallbacks = 0;
+  const passRatio = prob.passRatio ?? 1e-5;
   let mergeResidual = 0;
   let work = 0;
   let dissipation = 0;
@@ -502,13 +569,15 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
     const bw = boundaryWaves(states[0], d);
     if (!bw) {
       warnings.push(`t = ${t.toFixed(4)}: краевая задача не решена`);
+      if ((globalThis as any).__dbg) console.log('BPFAIL', JSON.stringify({ a: states[0], d }));
       return;
     }
     insertWaves(0, 0, bw.left, bw.seq, states[0]);
     events++;
   };
 
-  while (t < prob.tEnd - 1e-13 && events < 20000) {
+  const maxEvents = prob.maxEvents ?? 20000;
+  while (t < prob.tEnd - 1e-13 && events < maxEvents) {
     // ближайшее событие
     let tNext = prob.tEnd;
     let kind: 'end' | 'bc' | 'collide' | 'hit' | 'frame' = 'end';
@@ -561,9 +630,35 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
       closeSeg(b, t);
       const l = states[which];
       const r = states[which + 2];
+      // Встреча сильного фронта с крошечным (в 1e5 раз слабее): сильный проходит насквозь, слабый
+      // поглощается (ошибка в балансах ~ скачку слабого). Задача о распаде разрыва для таких пар плохо
+      // обусловлена и лишь плодит ещё более слабые отражения.
+      if (Math.min(a.strength, b.strength) < passRatio * Math.max(a.strength, b.strength)) {
+        const keep = a.strength >= b.strength ? a : b;
+        fronts.splice(which, 2, { ...keep, x, born: t, xBorn: x, strength: strengthOf(l, r) });
+        states.splice(which, 3, l, r);
+        absorbed++;
+        events++;
+        while (fronts.length && fronts.at(-1)!.x > xMax) {
+          closeSeg(fronts.at(-1)!, t);
+          fronts.pop();
+          states.pop();
+        }
+        maxFronts = Math.max(maxFronts, fronts.length);
+        continue;
+      }
       fronts.splice(which, 2);
       states.splice(which, 3, l); // между l и r будет вставлено решение задачи о распаде разрыва
       const rp = riemannProblem(c, l, r, fanStep);
+      if (!rp && Math.min(a.strength, b.strength) < 1e-2 * Math.max(a.strength, b.strength)) {
+        // запасной путь: задача не решилась, но одна волна намного слабее — сильная проходит насквозь
+        const keep = a.strength >= b.strength ? a : b;
+        states.splice(which + 1, 0, r); // сейчас states[which] = l; восстанавливаем l | r
+        fronts.splice(which, 0, { ...keep, x, born: t, xBorn: x, strength: strengthOf(l, r) });
+        fallbacks++;
+        events++;
+        continue;
+      }
       if (!rp) {
         warnings.push(`t = ${t.toFixed(4)}: распад разрыва не решён — расчёт остановлен`);
         states.splice(which + 1, 0, r);
@@ -598,7 +693,7 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
     }
     maxFronts = Math.max(maxFronts, fronts.length);
   }
-  if (events >= 20000) warnings.push('Достигнут предел числа событий (20000).');
+  if (events >= maxEvents) warnings.push(`Достигнут предел числа событий (${maxEvents}).`);
   for (const f of fronts) closeSeg(f, t);
   while (frames.length < nF) snapshot();
 
@@ -617,7 +712,7 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
     const s = last.states[i];
     en += (energy1d(c.m, [s.F[0], 0, s.F[1]]) - W0 + 0.5 * (s.v[0] ** 2 + s.v[1] ** 2)) * (xb - xa);
   }
-  return { frames, segments, events, maxFronts, warnings, kinematicError: kin + last.ub, work, energyGain: en, dissipation, merges, mergeResidual };
+  return { frames, segments, events, maxFronts, warnings, kinematicError: kin + last.ub, work, energyGain: en, dissipation, merges, mergeResidual, absorbed, fallbacks };
 }
 
 /** Состояние в точке x кадра. */

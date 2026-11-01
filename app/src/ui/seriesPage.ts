@@ -22,6 +22,7 @@ const FIELD_LABELS: Record<FieldKey, string> = {
 const MATERIALS: Record<string, { material: Material; F0: Vec3 }> = {
   'Материал 1 (ν < 0), как в §2.3': { material: MATERIAL_1, F0: [-0.00005, 0, 0.001] },
   'Материал 2 (ν > 0), как в §2.3': { material: MATERIAL_2, F0: [-0.005, 0, 0.001] },
+  'Материал 2, слабое предсжатие p0 = −0.0005 (растяжение достижимо)': { material: MATERIAL_2, F0: [-0.0005, 0, 0.001] },
 };
 
 const PULSE_PRESETS: Record<string, Pulse[]> = {
@@ -46,6 +47,10 @@ const PULSE_PRESETS: Record<string, Pulse[]> = {
     { start: 0.5, duration: 0.08, d: 0.002 },
   ],
   'Рывок наружу (растяжение)': [{ start: 0, duration: 0.15, d: -0.002 }],
+  'Удар, затем рывок (сравнить скорости сжатия и растяжения)': [
+    { start: 0, duration: 0.1, d: 0.002 },
+    { start: 0.3, duration: 0.1, d: -0.002 },
+  ],
   'Удар и сразу рывок (знакопеременный импульс)': [
     { start: 0, duration: 0.08, d: 0.002 },
     { start: 0.08, duration: 0.08, d: -0.002 },
@@ -468,6 +473,11 @@ function renderStatus() {
         `На каждом фронте точно выполнены условия на разрывах (2.40)–(2.42); простые волны представлены пучками слабых фронтов. ` +
         `Кинематический баланс ${fr.kinematicError.toExponential(1)}. Энергия: работа границы ${fmt(fr.work, 4)} = прирост энергии ${fmt(fr.energyGain, 4)} + диссипация на ударных фронтах (2.45) ${fmt(fr.dissipation, 3)} (расхождение ${(fr.work - fr.energyGain - fr.dissipation).toExponential(1)}).`,
     );
+    if (fr.coarsened)
+      add(
+        'warn',
+        `Сильная нелинейность (переход через p = 0) порождает лавину сопоставимых отражений, поэтому расчёт выполнен с огрублёнными порогами: фронты слабее 1e-7 отбрасываются, а при встрече волн, различающихся в 100 раз и более, сильная проходит насквозь (поглощено ${fr.absorbed}). Погрешность баланса — порядка этих порогов.`,
+      );
     for (const w of fr.warnings) add('err', w);
   } else if (r && !st.computing) {
     const diss = r.work > 0 ? (r.work - r.energyGain) / r.work : 0;
