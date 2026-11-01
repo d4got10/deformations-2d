@@ -40,6 +40,16 @@ const PULSE_PRESETS: Record<string, Pulse[]> = {
     { start: 0.2, duration: 1, d: 0.001 },
     { start: 0.4, duration: 1, d: 0.001 },
   ],
+  'Сжатие → растяжение → сжатие': [
+    { start: 0, duration: 0.08, d: 0.002 },
+    { start: 0.25, duration: 0.08, d: -0.002 },
+    { start: 0.5, duration: 0.08, d: 0.002 },
+  ],
+  'Рывок наружу (растяжение)': [{ start: 0, duration: 0.15, d: -0.002 }],
+  'Удар и сразу рывок (знакопеременный импульс)': [
+    { start: 0, duration: 0.08, d: 0.002 },
+    { start: 0.08, duration: 0.08, d: -0.002 },
+  ],
   'Один удар (проверка по §2.3)': [{ start: 0, duration: 1, d: 0.001 }],
 };
 
@@ -65,6 +75,8 @@ const st = {
   /** 'fronts' — метод волновых фронтов (как в диссертации), 'fv' — конечные объёмы (для сравнения). */
   method: 'fronts' as 'fronts' | 'fv',
   showFronts: true,
+  /** Рисовать и слабые фронты (отражения при встречах), с яркостью по логарифму скачка. */
+  weakFronts: false,
   fronts: null as FrontsResult | null,
   ms: 0,
   computing: 0,
@@ -150,7 +162,7 @@ function buildControls() {
   row(fsP, 'p0 = u1,1', preInputs[0], 's-in-p0');
   row(fsP, 's0 = u3,1', preInputs[1], 's-in-s0');
 
-  const fsU = fieldset(c, 'Удары по границе');
+  const fsU = fieldset(c, 'Воздействия на границу');
   const pre = document.createElement('select');
   pre.id = 's-pulse-preset';
   pre.style.width = '100%';
@@ -166,7 +178,8 @@ function buildControls() {
   fsU.appendChild(pre);
   const hint = document.createElement('p');
   hint.className = 'hint';
-  hint.textContent = 'Каждый удар: с момента t граница движется вглубь со скоростью d·c1 в течение Δt, затем стоит. Время — в единицах L/c1 (L — длина показанного участка).';
+  hint.textContent =
+    'С момента t граница движется со скоростью d·c1 в течение Δt, затем стоит. d > 0 — удар (граница вдавливается, сжатие), d < 0 — рывок наружу (растяжение). Время — в единицах L/c1 (L — длина показанного участка).';
   fsU.appendChild(hint);
   pulsesBox = document.createElement('div');
   pulsesBox.className = 'pulses';
@@ -205,6 +218,18 @@ function buildControls() {
   });
   fl.append(fcb, 'фронты на диаграмме x–t');
   fsN.appendChild(fl);
+  const wl = document.createElement('label');
+  wl.className = 'check';
+  const wcb = document.createElement('input');
+  wcb.type = 'checkbox';
+  wcb.id = 's-weak-fronts';
+  wcb.checked = st.weakFronts;
+  wcb.addEventListener('change', () => {
+    st.weakFronts = wcb.checked;
+    drawAll();
+  });
+  wl.append(wcb, 'показать слабые фронты (отражения при встречах; яркость — по логарифму скачка)');
+  fsN.appendChild(wl);
   const nsel = document.createElement('select');
   for (const n of [400, 800, 1600]) nsel.add(new Option(`${n} ячеек${n === 800 ? ' (по умолчанию)' : ''}`, String(n)));
   nsel.value = String(st.N);
@@ -272,7 +297,7 @@ function renderPulses() {
   pulsesBox.innerHTML = '';
   const head = document.createElement('div');
   head.className = 'pulse-row head';
-  head.innerHTML = '<span>№</span><span>t начала</span><span>Δt</span><span>d = v/c1</span><span></span>';
+  head.innerHTML = '<span>№</span><span>t начала</span><span>Δt</span><span>d (± )</span><span></span>';
   pulsesBox.appendChild(head);
   st.pulses.forEach((p, i) => {
     const r = document.createElement('div');
@@ -572,17 +597,28 @@ function drawXt() {
     ctx.clip();
     const segs = st.fronts.segments;
     const maxStr = Math.max(...segs.map((sg) => sg.strength), 1e-30);
-    for (const sg of segs as Segment[]) {
+    // слабые фронты рисуются первыми, чтобы сильные были сверху
+    const order = [...(segs as Segment[])].sort((a, b) => a.strength - b.strength);
+    for (const sg of order) {
       const rel = sg.strength / maxStr;
-      if (rel < 1e-4) continue; // самые слабые отражения не загромождают картину
+      if (!st.weakFronts && rel < 1e-4) continue; // по умолчанию самые слабые отражения не рисуются
       ctx.strokeStyle = sg.fam === 'fast' ? css('--front1') : css('--front2');
-      ctx.globalAlpha = sg.kind === 'simple' ? 0.55 : 0.95;
-      ctx.lineWidth = sg.kind === 'simple' ? 0.8 : Math.max(0.8, Math.min(2.2, 0.8 + 3 * Math.sqrt(rel)));
+      if (st.weakFronts) {
+        // логарифмическая шкала: от 1e-7 до 1 относительно сильнейшего фронта
+        const lg = Math.max(0, Math.min(1, (Math.log10(rel) + 7) / 7));
+        ctx.globalAlpha = 0.15 + 0.85 * lg;
+        ctx.lineWidth = 0.6 + 1.6 * lg;
+        ctx.setLineDash(sg.x1 < sg.x0 ? [3, 2] : []); // фронты, бегущие к границе, — штрихом
+      } else {
+        ctx.globalAlpha = sg.kind === 'simple' ? 0.55 : 0.95;
+        ctx.lineWidth = sg.kind === 'simple' ? 0.8 : Math.max(0.8, Math.min(2.2, 0.8 + 3 * Math.sqrt(rel)));
+      }
       ctx.beginPath();
       ctx.moveTo(X(sg.x0), Y(sg.t0));
       ctx.lineTo(X(sg.x1), Y(sg.t1));
       ctx.stroke();
     }
+    ctx.setLineDash([]);
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -712,20 +748,23 @@ function drawStrip() {
   ctx.lineTo(g2[0], g2[1]);
   ctx.stroke();
   const vb = boundaryVelocity(st.pulses, fr.t);
-  if (vb > 0) {
+  if (vb !== 0) {
     ctx.strokeStyle = css('--accent');
     ctx.fillStyle = css('--accent');
     ctx.lineWidth = 2;
     for (const yy of [-0.5, 0, 0.5]) {
       const [ex, ey] = map(0, yy * half);
+      // удар — стрелка к границе (вглубь), рывок — стрелка от границы (наружу)
+      const [tip, tail] = vb > 0 ? [ex - 6, ex - 50] : [ex - 50, ex - 6];
+      const sgn = vb > 0 ? 1 : -1;
       ctx.beginPath();
-      ctx.moveTo(ex - 50, ey);
-      ctx.lineTo(ex - 6, ey);
+      ctx.moveTo(tail, ey);
+      ctx.lineTo(tip, ey);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(ex - 6, ey);
-      ctx.lineTo(ex - 14, ey - 5);
-      ctx.lineTo(ex - 14, ey + 5);
+      ctx.moveTo(tip, ey);
+      ctx.lineTo(tip - sgn * 8, ey - 5);
+      ctx.lineTo(tip - sgn * 8, ey + 5);
       ctx.closePath();
       ctx.fill();
     }
@@ -736,7 +775,7 @@ function drawStrip() {
   ctx.font = '12px system-ui, sans-serif';
   ctx.fillStyle = css('--muted');
   ctx.textAlign = 'right';
-  ctx.fillText(`t c1/L = ${fr.t.toFixed(3)} · u1 ×${K}, u3 ×${Kt} · ${vb > 0 ? `удар: d = ${vb}` : 'граница стоит'}`, w - 10, 16);
+  ctx.fillText(`t c1/L = ${fr.t.toFixed(3)} · u1 ×${K}, u3 ×${Kt} · ${vb > 0 ? `удар: d = ${vb}` : vb < 0 ? `рывок наружу: d = ${vb}` : 'граница стоит'}`, w - 10, 16);
   ctx.textAlign = 'left';
 }
 
@@ -790,8 +829,8 @@ function render3d(fr: SeriesResult['frames'][number], du1: Float64Array, du3: Fl
     Xmax: 1,
     colorAt,
     fronts: [],
-    load: vb > 0 ? [1, 0, 0] : null,
-    loadLabel: vb > 0 ? `удар: d = ${vb}` : 'граница стоит',
+    load: vb > 0 ? [1, 0, 0] : vb < 0 ? [-1, 0, 0] : null,
+    loadLabel: vb > 0 ? `удар: d = ${vb}` : vb < 0 ? `рывок наружу: d = ${vb}` : 'граница стоит',
     theme: { bg: css('--panel'), grid: css('--muted'), text: css('--text'), muted: css('--muted'), surface: css('--surface'), accent: css('--accent') },
     caption: `t c1/L = ${fr.t.toFixed(3)} · u1 ×${st.magnify}, u3 ×${st.magnifyT} · цвет: ${FIELD_LABELS[st.field]} · вращение — мышью`,
   });

@@ -254,7 +254,9 @@ export function update(container: HTMLElement, data: Scene3DData) {
       for (const z of [-0.6, 0, 0.6]) {
         const tip = P(-0.015, y * H, z * H, d0);
         const L = 0.22;
-        st.dynamic.add(new THREE.ArrowHelper(dir, tip.clone().addScaledVector(dir, -L), L, accent, 0.05, 0.03));
+        // нагрузка к границе — стрелка снаружи упирается в неё; рывок наружу — стрелка от границы наружу
+        const origin = dir.x >= 0 ? tip.clone().addScaledVector(dir, -L) : tip.clone();
+        st.dynamic.add(new THREE.ArrowHelper(dir, origin, L, accent, 0.05, 0.03));
       }
   }
   addLabel(st, data.loadLabel, P(-0.2, H * 1.15, 0, d0), data.theme.accent);

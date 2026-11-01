@@ -413,6 +413,12 @@ function assemble(prob: ImpactProblem, P: Plane, X0: Vec2, eStar: Vec2 | null, c
       F = prof.at(-1)!.F;
       v = prof.at(-1)!.v;
       waves.push({ kind: 'fan', family: w.fam, label: 'простая волна', xiFront: w.xiFront, xiBack: w.xiBack, profile: prof, dissipation: 0 });
+      // Невыпуклость: если скорость внутри веера не убывает монотонно, настоящее решение —
+      // составная волна (веер + примыкающая ударная), а не веер по всей интегральной кривой.
+      if (prof.some((q, j) => j > 0 && q.xi > prof[j - 1].xi + 1e-9))
+        warnings.push(
+          `Скорость внутри простой волны (${w.fam === 'fast' ? 'квазипродольной' : 'квазипоперечной'}) немонотонна — семейство невыпукло; точное решение здесь — составная волна «веер + ударная» (её строит метод фронтов на вкладке «Серия ударов»).`,
+        );
     }
     pushZone();
     if (i === 0 && rot === 'after-fast') addRotation(ch.X[1]);

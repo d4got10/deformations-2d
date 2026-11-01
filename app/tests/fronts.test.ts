@@ -102,3 +102,39 @@ describe('метод волновых фронтов', () => {
     });
   }
 });
+
+describe('растяжение границы (рывок наружу)', () => {
+  for (const [name, m, p0] of CASES) {
+    it(`${name}: растяжение уходит простой волной, ударной волны растяжения нет (§2.1, аналог теоремы Цемплена)`, () => {
+      const ex = solveImpact({ material: m, F0: [p0, 0, 0.001], bc: { type: 'velocity', d: -0.002 } })!;
+      expect(ex.waves[0].kind).toBe('fan');
+      const bp = boundaryProblem({ m }, { F: [p0, 0.001], v: [0, 0] }, -0.002, 2.5e-4)!;
+      expect(bp.fast.pieces.length).toBeGreaterThan(1);
+      expect(Math.abs(bp.slow.behind.F[0] - ex.zones.at(-1)!.F[0])).toBeLessThan(1e-8);
+    });
+
+    it(`${name}: серия «сжатие → растяжение → сжатие» отслеживается фронтами, конечные объёмы к ней сходятся`, () => {
+      const pulses = [
+        { start: 0, duration: 0.08, d: 0.002 },
+        { start: 0.25, duration: 0.08, d: -0.002 },
+        { start: 0.5, duration: 0.08, d: 0.002 },
+      ];
+      const res = trackFronts({ material: m, F0: [p0, 0, 0.001], pulses, tEnd: 0.92, frames: 47 });
+      expect(res.warnings).toEqual([]);
+      expect(Math.abs(res.kinematicError)).toBeLessThan(1e-8);
+      expect(res.mergeResidual).toBeLessThan(1e-4);
+      const diff = (N: number) => {
+        const fv = simulate({ material: m, F0: [p0, 0, 0.001], pulses, N, tEnd: 0.92, frames: 47 });
+        let e = 0;
+        for (const k of [23, 46]) for (let i = 0; i < N; i++) e += Math.abs(stateAt(res.frames[k], (i + 0.5) / N).F[0] - cell(fv.frames[k], N, i).F[0]) / N;
+        return e / 2;
+      };
+      expect(diff(800)).toBeLessThan(0.8 * diff(400));
+    });
+  }
+
+  it('материал 1: при растяжении семейство невыпукло — точный решатель предупреждает о составной волне', () => {
+    const ex = solveImpact({ material: CASES[0][1], F0: [-0.00005, 0, 0.001], bc: { type: 'velocity', d: -0.002 } })!;
+    expect(ex.warnings.some((w) => w.includes('составная волна'))).toBe(true);
+  });
+});

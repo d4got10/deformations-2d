@@ -89,6 +89,9 @@ export interface FrontsResult {
   work: number;
   energyGain: number;
   dissipation: number;
+  /** Сколько раз фронты составной волны (невыпуклость) сливались при рождении, и наибольшая относительная невязка [T] − G²[F] у слитых фронтов. */
+  merges: number;
+  mergeResidual: number;
 }
 
 // ---------------------------------------------------------------- механика фронтов
@@ -205,14 +208,23 @@ function wave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number):
   const n = eps >= 0 || !R.gnl ? 1 : nFan;
   const pieces: WaveOut['pieces'] = [];
   let cur = a;
+  let prevDir: V2 | null = null;
   for (let j = 0; j < n; j++) {
     const Rj = j === 0 ? R : orientedR(c, cur.F, f);
-    const { Xb, G2 } = hugoniot(c, cur.F, f, eps / n, Rj);
+    // Пучок идёт по волновой кривой непрерывно (без разворотов). Если семейство невыпукло
+    // (скорость вдоль кривой проходит через экстремум, как у материала 1 при растяжении),
+    // дальше экстремума шаги становятся сжимающими скачками: они догоняют друг друга и
+    // сливаются в ударную волну — получается составная волна «веер + ударная».
+    let e = eps / n;
+    if (prevDir && (-Rj.r[0] * prevDir[0] - Rj.r[1] * prevDir[1]) * Math.sign(-e) < 0) e = -e;
+    const { Xb, G2 } = hugoniot(c, cur.F, f, e, Rj);
     const G = Math.sqrt(Math.max(G2, 0));
     // [v] = −G_signed [F] с [·] = справа − слева  ⇒  v_b = v_a + dir·G·(F_a − F_b)
     const v: V2 = [cur.v[0] + dir * G * (cur.F[0] - Xb[0]), cur.v[1] + dir * G * (cur.F[1] - Xb[1])];
     const behind = { F: Xb, v };
-    pieces.push({ G: dir * G, behind, kind: n === 1 && eps >= 0 ? 'shock' : n === 1 ? 'shock' : 'simple' });
+    pieces.push({ G: dir * G, behind, kind: n === 1 ? 'shock' : e > 0 ? 'shock' : 'simple' });
+    const dl = Math.hypot(Xb[0] - cur.F[0], Xb[1] - cur.F[1]);
+    if (dl > 0) prevDir = [(Xb[0] - cur.F[0]) / dl, (Xb[1] - cur.F[1]) / dl];
     cur = behind;
   }
   return { pieces, behind: cur };
@@ -384,6 +396,8 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
   let ub = 0;
   let events = 0;
   let maxFronts = 0;
+  let merges = 0;
+  let mergeResidual = 0;
   let work = 0;
   let dissipation = 0;
   const W0 = energy1d(c.m, prob.F0);
@@ -434,6 +448,28 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
       prev = next;
     }
     newS[newS.length - 1] = right; // последнее состояние совпадает с исходным справа (с точностью решения)
+    // Составная волна при невыпуклости: соседние фронты одного семейства и направления, которые
+    // рождаются «в обратном порядке» (задний быстрее переднего), сразу сливаются в один ударный фронт.
+    // Его скорость — из условий на разрыве по МНК: G² = [T]·[F]/|[F]|² (невязка ~ шаг пучка³).
+    for (let k = 0; k + 1 < newF.length; ) {
+      const A = newF[k];
+      const B = newF[k + 1];
+      if (A.fam === B.fam && Math.sign(A.speed) === Math.sign(B.speed) && A.speed > B.speed + 1e-13) {
+        const L = newS[k];
+        const R = newS[k + 2];
+        const TL = T2(c, L.F);
+        const TR = T2(c, R.F);
+        const dF: V2 = [R.F[0] - L.F[0], R.F[1] - L.F[1]];
+        const G2 = ((TR[0] - TL[0]) * dF[0] + (TR[1] - TL[1]) * dF[1]) / (dF[0] ** 2 + dF[1] ** 2);
+        const G = Math.sign(A.speed) * Math.sqrt(Math.max(G2, 0));
+        const resid = Math.hypot(TR[0] - TL[0] - G2 * dF[0], TR[1] - TL[1] - G2 * dF[1]) / Math.max(Math.hypot(TR[0] - TL[0], TR[1] - TL[1]), 1e-30);
+        mergeResidual = Math.max(mergeResidual, resid);
+        newF.splice(k, 2, { ...A, speed: G, kind: 'shock', strength: strengthOf(L, R) });
+        newS.splice(k + 1, 1);
+        if (k > 0) k--; // слитый фронт может оказаться быстрее предыдущего
+        merges++;
+      } else k++;
+    }
     fronts.splice(pos, 0, ...newF);
     states.splice(pos, 1, ...newS);
   };
@@ -581,7 +617,7 @@ export function trackFronts(prob: FrontsProblem): FrontsResult {
     const s = last.states[i];
     en += (energy1d(c.m, [s.F[0], 0, s.F[1]]) - W0 + 0.5 * (s.v[0] ** 2 + s.v[1] ** 2)) * (xb - xa);
   }
-  return { frames, segments, events, maxFronts, warnings, kinematicError: kin + last.ub, work, energyGain: en, dissipation };
+  return { frames, segments, events, maxFronts, warnings, kinematicError: kin + last.ub, work, energyGain: en, dissipation, merges, mergeResidual };
 }
 
 /** Состояние в точке x кадра. */

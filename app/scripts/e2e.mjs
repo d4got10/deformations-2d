@@ -89,6 +89,16 @@ try {
     await page.screenshot({ path: `${outDir}/series-fronts-${scheme}.png`, fullPage: false });
     if (ser.n < 100) fail(`серия ударов: мало кадров ${ser.n}`);
     if (!(ser.w >= ser.e)) fail('серия ударов: прирост энергии больше работы границы');
+    // растяжение: шаблон «сжатие → растяжение → сжатие», слабые фронты
+    await page.selectOption('#s-pulse-preset', 'Сжатие → растяжение → сжатие');
+    await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts && window.__series.pulses.some((p) => p.d < 0), null, { timeout: 60000 });
+    if (await page.evaluate(() => window.__series.fronts.warnings.length)) fail('растяжение: метод фронтов выдал предупреждения');
+    await page.check('#s-weak-fronts');
+    await page.selectOption('#s-field', 's');
+    await page.waitForTimeout(300);
+    await page.locator('#s-xt').screenshot({ path: `${outDir}/series-tension-weak-${scheme}.png` });
+    await page.uncheck('#s-weak-fronts');
+    await page.selectOption('#s-field', 'p');
     // один удар: численное решение совпадает с точным (пунктир)
     await page.selectOption('#s-pulse-preset', 'Один удар (проверка по §2.3)');
     await page.waitForFunction(() => window.__series.computing === 0 && window.__series.res && window.__series.pulses.length === 1, null, { timeout: 60000 });
