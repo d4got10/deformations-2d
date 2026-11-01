@@ -55,6 +55,8 @@ const st = {
   magnify: 100,
   /** Увеличение поперечных (сдвиговых) перемещений — при нормальном ударе они в сотни раз меньше. */
   magnifyT: 1000,
+  /** Усиливать поперечные (сдвиговые) перемещения отдельно; по умолчанию масштаб общий — видно чистое сжатие. */
+  boostShear: false,
   view: '2d' as '2d' | '3d',
   playing: true,
   speed: 0.12,
@@ -223,7 +225,24 @@ function buildControls() {
   const mag = numInput(st.magnify, '1', (v) => ((st.magnify = v), drawAll()), 'увеличение');
   row(fsN, 'Увеличение', mag, 's-mag');
   const magT = numInput(st.magnifyT, '1', (v) => ((st.magnifyT = v), drawAll()), 'увеличение сдвига');
-  row(fsN, '× сдвиг', magT, 's-magT');
+  const bl = document.createElement('label');
+  bl.className = 'check';
+  const bcb = document.createElement('input');
+  bcb.type = 'checkbox';
+  bcb.id = 's-boost-shear';
+  bcb.checked = st.boostShear;
+  bl.append(bcb, 'усилить сдвиг u3 отдельно (сдвиг в ~1000 раз слабее сжатия)');
+  fsN.appendChild(bl);
+  const magTRow = document.createElement('div');
+  fsN.appendChild(magTRow);
+  row(magTRow, '× сдвиг', magT, 's-magT');
+  magTRow.hidden = !st.boostShear;
+  bcb.addEventListener('change', () => {
+    st.boostShear = bcb.checked;
+    magTRow.hidden = !st.boostShear;
+    autoMagnify();
+    drawAll();
+  });
   const tIn = document.createElement('input');
   tIn.type = 'range';
   tIn.min = '0';
@@ -381,7 +400,8 @@ function framesFromFronts(fr: FrontsResult): SeriesResult {
 }
 
 function autoMagnify() {
-  const r = st.res!;
+  if (!st.res) return;
+  const r = st.res;
   let mx = 1e-9;
   for (const fr of r.frames) for (let i = 0; i < r.N; i++) mx = Math.max(mx, Math.abs(fr.U[i] - st.F0[0]));
   st.magnify = Math.max(1, Math.round(0.3 / mx));
@@ -396,7 +416,7 @@ function autoMagnify() {
       us = Math.max(us, Math.abs(acc));
     }
   }
-  st.magnifyT = Math.max(1, Math.min(1e6, Math.round(0.05 / us)));
+  st.magnifyT = st.boostShear ? Math.max(1, Math.min(1e6, Math.round(0.05 / us))) : st.magnify;
   const mt = document.getElementById('s-magT') as HTMLInputElement | null;
   if (mt) mt.value = String(st.magnifyT);
 }
