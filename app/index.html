@@ -26,7 +26,13 @@
         <section>
           <div class="scene-grid">
             <div class="scene-wrap">
+              <div class="view-toggle seg" role="group" aria-label="Вид">
+                <button id="i-view-2d" data-view="2d" aria-pressed="true">2D сечения</button>
+                <button id="i-view-3d" data-view="3d" aria-pressed="false">3D</button>
+                <button id="i-view-reset" title="Вернуть камеру" hidden>⟲ камера</button>
+              </div>
               <canvas id="i-scene" class="tall" aria-label="Деформированное полупространство в двух сечениях"></canvas>
+              <div id="i-3d" class="tall view3d" hidden></div>
               <div id="i-legend" class="legend"></div>
             </div>
             <div class="scene-wrap">

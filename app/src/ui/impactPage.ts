@@ -39,6 +39,7 @@ const st = {
   speed: 0.15,
   tau: 0.75,
   sweepParam: 'd' as 'd' | 'p' | 'g' | 's',
+  view: '2d' as '2d' | '3d',
   sol: null as ImpactSolution | null,
   wTable: null as ((xi: number) => Vec3) | null,
   error: '',
@@ -601,11 +602,15 @@ function setup(canvas: HTMLCanvasElement) {
 
 function drawScene() {
   const canvas = $<HTMLCanvasElement>('i-scene');
-  const S = setup(canvas);
+  const box3d = $('i-3d');
+  const is3d = st.view === '3d';
+  canvas.hidden = is3d;
+  box3d.hidden = !is3d;
+  const S = is3d ? null : setup(canvas);
   const leg = $('i-legend');
   leg.innerHTML = '';
-  if (!S) return;
-  const { ctx, w, h } = S;
+  if (!is3d && !S) return;
+  const { ctx, w, h } = S ?? { ctx: null as unknown as CanvasRenderingContext2D, w: 0, h: 0 };
   const s = st.sol;
   const W = st.wTable;
   if (!s || !W) return;
@@ -658,7 +663,8 @@ function drawScene() {
   Xs.sort((a, b) => a - b);
   const D = Xs.map(disp);
 
-  panels.forEach((P, pi) => {
+  if (is3d) render3d(s, Xs, D, disp, Xmax, (X) => colorAt(xiOf(X)), xi1, tau);
+  else panels.forEach((P, pi) => {
     const top = pi * (ph + gap);
     const titleH = 22;
     const oy = top + titleH + (ph - titleH) / 2;
@@ -786,11 +792,13 @@ function drawScene() {
       ctx.fillText(wv.kind === 'fan' ? 'веер' : wv.label, px - 8, top + 34);
     });
   });
-  ctx.font = '12px system-ui, sans-serif';
-  ctx.fillStyle = css('--muted');
-  ctx.textAlign = 'right';
-  ctx.fillText(`перемещения ×${K}, t/T = ${st.tau.toFixed(2)}`, w - 10, 15);
-  ctx.textAlign = 'left';
+  if (!is3d) {
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillStyle = css('--muted');
+    ctx.textAlign = 'right';
+    ctx.fillText(`перемещения ×${K}, t/T = ${st.tau.toFixed(2)}`, w - 10, 15);
+    ctx.textAlign = 'left';
+  }
 
   // легенда
   const lg = (html: string) => {
@@ -807,6 +815,60 @@ function drawScene() {
     lg(`<span class="sw" style="background:rgba(48,104,214,0.85)"></span>−${fmt(vmax, 3)}`);
     lg(`<span class="sw" style="background:rgba(214,72,52,0.85)"></span>+${fmt(vmax, 3)}`);
   }
+}
+
+// ---------------------------------------------------------------- 3D
+
+let view3d: typeof import('./impact3d.ts') | null = null;
+let view3dLoading = false;
+
+function render3d(s: ImpactSolution, Xs: number[], D: Vec3[], disp: (X: number) => Vec3, Xmax: number, colorAt: (X: number) => string, xi1: number, tau: number) {
+  if (!view3d) {
+    if (!view3dLoading) {
+      view3dLoading = true;
+      import('./impact3d.ts').then((m) => {
+        view3d = m;
+        draw();
+      });
+    }
+    return;
+  }
+  const Tb = s.zones.at(-1)!.T;
+  const load: Vec3 = s.problem.bc.type === 'velocity' ? [1, 0, 0] : [-Tb[0], -Tb[1], -Tb[2]];
+  const fronts: { X: number; color: string; label: string; dashed: boolean }[] = [];
+  for (const w of s.waves) {
+    const color = w.family === 'fast' ? css('--front1') : w.family === 'slow' ? css('--front2') : css('--accent');
+    if (w.kind === 'fan') {
+      fronts.push({ X: (w.xiFront / xi1) * tau, color, label: 'веер ξ⁺', dashed: true });
+      fronts.push({ X: (w.xiBack / xi1) * tau, color, label: 'ξ⁻', dashed: true });
+    } else fronts.push({ X: (w.xiFront / xi1) * tau, color, label: w.label, dashed: w.kind === 'rotation' });
+  }
+  view3d.update($('i-3d'), {
+    Xs,
+    D,
+    disp,
+    K: st.magnify,
+    Xmax,
+    colorAt,
+    fronts,
+    load,
+    loadLabel: s.problem.bc.type === 'velocity' ? 'v* (нормальный удар)' : 'нагрузка σ*',
+    theme: { bg: css('--panel'), grid: css('--grid').startsWith('rgba') ? css('--muted') : css('--grid'), text: css('--text'), muted: css('--muted'), surface: css('--surface'), accent: css('--accent') },
+    caption: `перемещения ×${st.magnify}, t/T = ${st.tau.toFixed(2)} · ось бруска выделена · вращение — мышью, масштаб — колесом`,
+  });
+}
+
+function buildViewToggle() {
+  const btns = ['i-view-2d', 'i-view-3d'].map((id) => $<HTMLButtonElement>(id));
+  const reset = $<HTMLButtonElement>('i-view-reset');
+  for (const b of btns)
+    b.addEventListener('click', () => {
+      st.view = b.dataset.view as typeof st.view;
+      for (const x of btns) x.setAttribute('aria-pressed', String(x === b));
+      reset.hidden = st.view !== '3d';
+      draw();
+    });
+  reset.addEventListener('click', () => view3d?.resetView());
 }
 
 function drawXt() {
@@ -909,10 +971,12 @@ function loop(t: number) {
 }
 
 buildControls();
+buildViewToggle();
 syncAll();
 buildSweepControls();
 recompute();
 new ResizeObserver(() => draw()).observe($('i-scene'));
+new ResizeObserver(() => st.view === '3d' && draw()).observe($('i-3d'));
 new ResizeObserver(() => draw()).observe($('i-xt'));
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => recompute());
 requestAnimationFrame(loop);

@@ -401,3 +401,58 @@ canvas.tall {
   width: 100%;
   min-width: 0;
 }
+
+/* 3D-вид */
+.view-toggle {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  z-index: 2;
+  margin: 0;
+  background: var(--panel);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.view-toggle button {
+  flex: none;
+  padding: 3px 10px;
+}
+.view3d {
+  position: relative;
+  width: 100%;
+  height: min(70vh, 600px);
+  overflow: hidden;
+  touch-action: none;
+}
+.view3d canvas {
+  display: block;
+  position: absolute;
+  inset: 0;
+}
+.view3d[hidden],
+canvas[hidden] {
+  display: none;
+}
+.overlay3d {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font: 600 12px system-ui, sans-serif;
+}
+.label3d {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  padding: 0 2px;
+  text-shadow: 0 0 3px var(--panel), 0 0 3px var(--panel);
+}
+.caption3d {
+  position: absolute;
+  left: 10px;
+  top: 8px;
+  right: 10px;
+  color: var(--muted);
+  font-weight: 400;
+}

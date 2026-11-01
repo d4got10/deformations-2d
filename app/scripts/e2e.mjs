@@ -53,6 +53,26 @@ try {
     await page.dispatchEvent('#i-in-tau', 'change');
     await page.waitForTimeout(300);
     await page.screenshot({ path: `${outDir}/ch2-oblique-${scheme}.png`, fullPage: false });
+    // 3D-вид: холст WebGL появился и что-то нарисовал
+    await page.click('#i-view-3d');
+    await page.waitForSelector('#i-3d canvas');
+    await page.waitForTimeout(700);
+    const colors = await page.evaluate(() => {
+      const c = document.querySelector('#i-3d canvas');
+      const tmp = document.createElement('canvas');
+      tmp.width = 120;
+      tmp.height = 80;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(c, 0, 0, 120, 80);
+      const d = ctx.getImageData(0, 0, 120, 80).data;
+      const set = new Set();
+      for (let i = 0; i < d.length; i += 4) set.add((d[i] >> 4) * 256 + (d[i + 1] >> 4) * 16 + (d[i + 2] >> 4));
+      return { n: set.size, h: c.clientHeight };
+    });
+    if (colors.n < 12) fail(`3D-вид почти пустой: ${colors.n} цветов`);
+    if (colors.h < 250) fail(`3D-холст слишком низкий: ${colors.h}px`);
+    await page.screenshot({ path: `${outDir}/ch2-3d-${scheme}.png`, fullPage: false });
+    await page.click('#i-view-2d');
     // переключение типа удара
     await page.click('#i-bc-velocity');
     await page.waitForTimeout(300);
