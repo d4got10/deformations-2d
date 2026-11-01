@@ -879,34 +879,35 @@ function drawXt() {
   const s = st.sol;
   if (!s) return;
   const xi1 = s.waves[0].xiFront;
-  const m = { l: 40, r: 14, t: 44, b: 34 };
-  const X = (x: number) => m.l + (x / 1.12) * (w - m.l - m.r);
-  const Y = (t: number) => h - m.b - t * (h - m.t - m.b);
+  const m = { l: 44, r: 50, t: 30, b: 34 };
+  // время — по горизонтали, x — по вертикали (граница x = 0 внизу)
+  const T = (t: number) => m.l + t * (w - m.l - m.r);
+  const Xv = (x: number) => h - m.b - (x / 1.12) * (h - m.t - m.b);
   ctx.font = '600 12px system-ui, sans-serif';
   ctx.fillStyle = css('--text');
-  ctx.fillText('Диаграмма x–t: волны — лучи x = G t', 10, 16);
+  ctx.fillText('Диаграмма t–x: волны — лучи x = G t', 10, 16);
   ctx.strokeStyle = css('--border');
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(X(0), Y(0));
-  ctx.lineTo(X(1.12), Y(0));
-  ctx.moveTo(X(0), Y(0));
-  ctx.lineTo(X(0), Y(1));
+  ctx.moveTo(T(0), Xv(0));
+  ctx.lineTo(T(1), Xv(0));
+  ctx.moveTo(T(0), Xv(0));
+  ctx.lineTo(T(0), Xv(1.12));
   ctx.stroke();
   ctx.font = '11px system-ui, sans-serif';
   ctx.fillStyle = css('--muted');
-  ctx.fillText('x1', X(1.12) - 12, Y(0) + 16);
-  ctx.fillText('t', X(0) - 14, Y(1) + 4);
-  ctx.fillText('граница', X(0) + 4, Y(0) + 26);
+  ctx.fillText('t', T(1) - 4, Xv(0) + 16);
+  ctx.fillText('x1', T(0) - 18, Xv(1.12) + 8);
+  ctx.fillText('граница x1 = 0', T(0) + 4, Xv(0) + 26);
   // вееры
   for (const wv of s.waves)
     if (wv.kind === 'fan') {
       ctx.fillStyle = css('--front2');
       ctx.globalAlpha = 0.18;
       ctx.beginPath();
-      ctx.moveTo(X(0), Y(0));
-      ctx.lineTo(X(wv.xiFront / xi1), Y(1));
-      ctx.lineTo(X(wv.xiBack / xi1), Y(1));
+      ctx.moveTo(T(0), Xv(0));
+      ctx.lineTo(T(1), Xv(wv.xiFront / xi1));
+      ctx.lineTo(T(1), Xv(wv.xiBack / xi1));
       ctx.closePath();
       ctx.fill();
       ctx.globalAlpha = 1;
@@ -919,35 +920,36 @@ function drawXt() {
       ctx.lineWidth = 2;
       ctx.setLineDash(wv.kind === 'rotation' ? [3, 4] : wv.kind === 'fan' ? [] : [7, 5]);
       ctx.beginPath();
-      ctx.moveTo(X(0), Y(0));
-      ctx.lineTo(X(xi / xi1), Y(1));
+      ctx.moveTo(T(0), Xv(0));
+      ctx.lineTo(T(1), Xv(xi / xi1));
       ctx.stroke();
       ctx.setLineDash([]);
     }
-    let px = X(wv.xiFront / xi1);
-    while (used.some((u) => Math.abs(u - px) < 30)) px -= 30;
-    used.push(px);
+    // подписи справа от концов лучей, без наложения
+    let py = Xv(wv.xiFront / xi1);
+    while (used.some((u) => Math.abs(u - py) < 14)) py += 14;
+    used.push(py);
     ctx.fillStyle = color;
     ctx.font = '600 11px system-ui, sans-serif';
-    ctx.fillText(wv.kind === 'fan' ? 'веер' : wv.label, px - 10, Y(1) - 6);
+    ctx.fillText(wv.kind === 'fan' ? 'веер' : wv.label, T(1) + 6, py + 4);
   }
-  // зоны: подписи на высоте t = 0.7 между соседними лучами
+  // зоны: подписи в момент t = 0.7 между соседними лучами
   ctx.fillStyle = css('--text');
   ctx.font = '600 12px system-ui, sans-serif';
   const tt = 0.7;
   const rayX = (xi: number) => (xi / xi1) * tt;
   s.zones.forEach((z, i) => {
-    const right = i === 0 ? Math.min(1.1, rayX(s.waves[0].xiFront) + 0.25) : rayX(s.waves[i - 1].xiBack);
-    const leftEdge = i === 0 ? rayX(s.waves[0].xiFront) : i < s.waves.length ? rayX(s.waves[i].xiFront) : 0;
-    if ((right - leftEdge) * (w - m.l - m.r) < 14) return; // слишком узкая зона
-    ctx.fillText(z.name, X(0.5 * (leftEdge + right)) - 4, Y(tt) + 4);
+    const top = i === 0 ? Math.min(1.1, rayX(s.waves[0].xiFront) + 0.25) : rayX(s.waves[i - 1].xiBack);
+    const bottom = i === 0 ? rayX(s.waves[0].xiFront) : i < s.waves.length ? rayX(s.waves[i].xiFront) : 0;
+    if (((top - bottom) / 1.12) * (h - m.t - m.b) < 14) return; // слишком узкая зона
+    ctx.fillText(z.name, T(tt) - 6, Xv(0.5 * (bottom + top)) + 4);
   });
   // текущее время
   ctx.strokeStyle = css('--muted');
   ctx.setLineDash([2, 3]);
   ctx.beginPath();
-  ctx.moveTo(X(0), Y(st.tau));
-  ctx.lineTo(X(1.12), Y(st.tau));
+  ctx.moveTo(T(st.tau), Xv(0));
+  ctx.lineTo(T(st.tau), Xv(1.12));
   ctx.stroke();
   ctx.setLineDash([]);
 }
