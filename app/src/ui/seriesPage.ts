@@ -52,6 +52,9 @@ const st = {
   tEnd: 0.92,
   field: 'p' as FieldKey,
   magnify: 100,
+  /** Увеличение поперечных (сдвиговых) перемещений — при нормальном ударе они в сотни раз меньше. */
+  magnifyT: 1000,
+  view: '2d' as '2d' | '3d',
   playing: true,
   speed: 0.12,
   t: 0.6,
@@ -193,6 +196,8 @@ function buildControls() {
   row(fsN, 'Цвет', fsel, 's-field');
   const mag = numInput(st.magnify, '1', (v) => ((st.magnify = v), drawAll()), 'увеличение');
   row(fsN, 'Увеличение', mag, 's-mag');
+  const magT = numInput(st.magnifyT, '1', (v) => ((st.magnifyT = v), drawAll()), 'увеличение сдвига');
+  row(fsN, '× сдвиг', magT, 's-magT');
   const tIn = document.createElement('input');
   tIn.type = 'range';
   tIn.min = '0';
@@ -325,6 +330,18 @@ function autoMagnify() {
   st.magnify = Math.max(1, Math.round(0.3 / mx));
   const m = document.getElementById('s-mag') as HTMLInputElement | null;
   if (m) m.value = String(st.magnify);
+  // сдвиг: максимальное поперечное перемещение ×Kt ≈ 0.05 L
+  let us = 1e-12;
+  for (const fr of r.frames) {
+    let acc = 0;
+    for (let i = r.N - 1; i >= 0; i--) {
+      acc -= (fr.U[2 * r.N + i] - st.F0[2]) * r.dx;
+      us = Math.max(us, Math.abs(acc));
+    }
+  }
+  st.magnifyT = Math.max(1, Math.min(1e6, Math.round(0.05 / us)));
+  const mt = document.getElementById('s-magT') as HTMLInputElement | null;
+  if (mt) mt.value = String(st.magnifyT);
 }
 
 // ---------------------------------------------------------------- вывод
@@ -509,9 +526,12 @@ function setup(canvas: HTMLCanvasElement) {
 
 function drawStrip() {
   const canvas = $<HTMLCanvasElement>('s-scene');
-  const S = setup(canvas);
-  if (!S || !st.res) return;
-  const { ctx, w, h } = S;
+  const box3d = $('s-3d');
+  canvas.hidden = st.view === '3d';
+  box3d.hidden = st.view !== '3d';
+  const S = st.view === '3d' ? null : setup(canvas);
+  if ((!S && st.view === '2d') || !st.res) return;
+  const { ctx, w, h } = S ?? { ctx: null as unknown as CanvasRenderingContext2D, w: 1, h: 1 };
   const r = st.res;
   const fr = frameAt(st.t);
   const N = r.N;
@@ -519,8 +539,9 @@ function drawStrip() {
   const right = 14;
   const sc = (w - left - right) / 1.0;
   const top = 34;
-  const half = (h - top - 16) / 2 / sc;
-  const oy = top + (h - top - 16) / 2;
+  const bottom = 48; // место под переключатель вида
+  const half = (h - top - bottom) / 2 / sc;
+  const oy = top + (h - top - bottom) / 2;
   // перемещения относительно предварительно деформированного состояния: Δu(x) = −∫_x^1 (F − F0) dx'
   const du1 = new Float64Array(N + 1);
   const du3 = new Float64Array(N + 1);
@@ -529,7 +550,12 @@ function drawStrip() {
     du3[i] = du3[i + 1] - (fr.U[2 * N + i] - st.F0[2]) * r.dx;
   }
   const K = st.magnify;
-  const map = (i: number, y: number) => [left + (i * r.dx + K * du1[i]) * sc, oy - (y + K * du3[i]) * sc] as const;
+  const Kt = st.magnifyT;
+  if (st.view === '3d') {
+    render3d(fr, du1, du3);
+    return;
+  }
+  const map = (i: number, y: number) => [left + (i * r.dx + K * du1[i]) * sc, oy - (y + Kt * du3[i]) * sc] as const;
   const base = parseColor(css('--panel'));
   for (let i = 0; i < N; i++) {
     const c = cell(fr, N, i);
@@ -602,8 +628,78 @@ function drawStrip() {
   ctx.font = '12px system-ui, sans-serif';
   ctx.fillStyle = css('--muted');
   ctx.textAlign = 'right';
-  ctx.fillText(`t c1/L = ${fr.t.toFixed(3)} · перемещения ×${K} · ${vb > 0 ? `удар: d = ${vb}` : 'граница стоит'}`, w - 10, 16);
+  ctx.fillText(`t c1/L = ${fr.t.toFixed(3)} · u1 ×${K}, u3 ×${Kt} · ${vb > 0 ? `удар: d = ${vb}` : 'граница стоит'}`, w - 10, 16);
   ctx.textAlign = 'left';
+}
+
+// ---------------------------------------------------------------- 3D
+
+let view3d: typeof import('./impact3d.ts') | null = null;
+let view3dLoading = false;
+
+function render3d(fr: SeriesResult['frames'][number], du1: Float64Array, du3: Float64Array) {
+  if (!view3d) {
+    if (!view3dLoading) {
+      view3dLoading = true;
+      import('./impact3d.ts').then((mod) => {
+        view3d = mod;
+        drawAll();
+      });
+    }
+    return;
+  }
+  const r = st.res!;
+  const N = r.N;
+  const step = Math.max(1, Math.round(N / 400));
+  const Xs: number[] = [];
+  const D: Vec3[] = [];
+  for (let i = 0; i <= N; i += step) {
+    Xs.push(i * r.dx);
+    D.push([du1[i], 0, du3[i]]);
+  }
+  if (Xs.at(-1)! < 1) {
+    Xs.push(1);
+    D.push([du1[N], 0, du3[N]]);
+  }
+  const disp = (X: number): Vec3 => {
+    const i = Math.max(0, Math.min(N, Math.round(X / r.dx)));
+    return [du1[i], 0, du3[i]];
+  };
+  const base = parseColor(css('--panel'));
+  const colorAt = (X: number) => {
+    const i = Math.max(0, Math.min(N - 1, Math.floor(X / r.dx)));
+    const c = cell(fr, N, i);
+    const [R, G, B] = diverging(fieldOf(c.F, c.v) / fieldMax, base);
+    return `rgb(${R},${G},${B})`;
+  };
+  const vb = boundaryVelocity(st.pulses, fr.t);
+  view3d.update($('s-3d'), {
+    Xs,
+    D,
+    disp,
+    K: st.magnify,
+    Kt: st.magnifyT,
+    Xmax: 1,
+    colorAt,
+    fronts: [],
+    load: vb > 0 ? [1, 0, 0] : null,
+    loadLabel: vb > 0 ? `удар: d = ${vb}` : 'граница стоит',
+    theme: { bg: css('--panel'), grid: css('--muted'), text: css('--text'), muted: css('--muted'), surface: css('--surface'), accent: css('--accent') },
+    caption: `t c1/L = ${fr.t.toFixed(3)} · u1 ×${st.magnify}, u3 ×${st.magnifyT} · цвет: ${FIELD_LABELS[st.field]} · вращение — мышью`,
+  });
+}
+
+function buildViewToggle() {
+  const btns = ['s-view-2d', 's-view-3d'].map((id) => $<HTMLButtonElement>(id));
+  const reset = $<HTMLButtonElement>('s-view-reset');
+  for (const b of btns)
+    b.addEventListener('click', () => {
+      st.view = b.dataset.view as typeof st.view;
+      for (const x of btns) x.setAttribute('aria-pressed', String(x === b));
+      reset.hidden = st.view !== '3d';
+      drawAll();
+    });
+  reset.addEventListener('click', () => view3d?.resetView($('s-3d')));
 }
 
 /** Точное решение для первого удара (до момента следующего изменения скорости границы), если применимо. */
@@ -697,14 +793,16 @@ function loop(t: number) {
   const saved = st.t;
   st.t = Math.min(st.t, st.tEnd);
   syncPlay();
-  if ($('s-scene').clientWidth) drawAll();
+  if ($('page-series').hidden === false) drawAll();
   st.t = saved;
   requestAnimationFrame(loop);
 }
 
 buildControls();
+buildViewToggle();
 compute();
 new ResizeObserver(() => drawAll()).observe($('s-scene'));
+new ResizeObserver(() => st.view === '3d' && drawAll()).observe($('s-3d'));
 new ResizeObserver(() => drawAll()).observe($('s-xt'));
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   heatCache = null;

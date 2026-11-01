@@ -25,7 +25,10 @@ export interface Scene3DData {
   colorAt: (X: number) => string;
   fronts: { X: number; color: string; label: string; dashed: boolean }[];
   /** Направление нагрузки на границе в осях (x1, x2, x3). */
-  load: Vec3;
+  /** null — нагрузки сейчас нет (стрелки не рисуются). */
+  load: Vec3 | null;
+  /** Увеличение поперечных (сдвиговых) перемещений; по умолчанию = K. */
+  Kt?: number;
   loadLabel: string;
   theme: { bg: string; grid: string; text: string; muted: string; surface: string; accent: string };
   caption: string;
@@ -46,7 +49,8 @@ interface State {
   container: HTMLElement;
 }
 
-let S: State | null = null;
+/** По одному виду на контейнер (вкладки «Удар по границе» и «Серия ударов»). */
+const views = new Map<HTMLElement, State>();
 
 function init(container: HTMLElement): State {
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -72,8 +76,8 @@ function init(container: HTMLElement): State {
   const st: State = { renderer, scene, camera, controls, dynamic, overlay, labels: [], centerMat, container };
   controls.addEventListener('change', () => render(st));
   const tick = () => {
-    if (!S) return;
-    if (controls.update()) render(st);
+    if (!container.isConnected) return;
+    if (container.offsetParent !== null && controls.update()) render(st);
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
@@ -118,27 +122,31 @@ function render(st: State) {
   }
 }
 
-function disposeGroup(g: THREE.Group) {
+function disposeGroup(g: THREE.Group, keep: THREE.Material) {
   for (const c of [...g.children]) {
     g.remove(c);
     const o = c as THREE.Mesh;
     o.geometry?.dispose();
     const mat = o.material as THREE.Material | THREE.Material[] | undefined;
     if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-    else if (mat && mat !== S?.centerMat) mat.dispose();
+    else if (mat && mat !== keep) mat.dispose();
   }
 }
 
 export function update(container: HTMLElement, data: Scene3DData) {
-  if (!S || S.container !== container) S = init(container);
-  const st = S;
+  let st = views.get(container);
+  if (!st) {
+    st = init(container);
+    views.set(container, st);
+  }
   const bg = new THREE.Color(data.theme.bg);
   st.renderer.setClearColor(bg);
-  disposeGroup(st.dynamic);
+  disposeGroup(st.dynamic, st.centerMat);
   st.overlay.innerHTML = '';
   st.labels = [];
   const K = data.K;
-  const P = (X: number, y: number, z: number, d: Vec3) => new THREE.Vector3(X + K * d[0] + SHIFT, y + K * d[1], z + K * d[2]);
+  const Kt = data.Kt ?? K;
+  const P = (X: number, y: number, z: number, d: Vec3) => new THREE.Vector3(X + K * d[0] + SHIFT, y + Kt * d[1], z + Kt * d[2]);
   // оси three: x ← x1 (вправо), y ← x2 (вверх), z ← x3 (к зрителю)
 
   // --- боковые грани
@@ -238,15 +246,17 @@ export function update(container: HTMLElement, data: Scene3DData) {
   }
 
   // --- нагрузка на границе
-  const dir = new THREE.Vector3(data.load[0], data.load[1], data.load[2]).normalize();
   const d0 = data.disp(0);
-  const accent = new THREE.Color(data.theme.accent);
-  for (const y of [-0.6, 0, 0.6])
-    for (const z of [-0.6, 0, 0.6]) {
-      const tip = P(-0.015, y * H, z * H, d0);
-      const L = 0.22;
-      st.dynamic.add(new THREE.ArrowHelper(dir, tip.clone().addScaledVector(dir, -L), L, accent, 0.05, 0.03));
-    }
+  if (data.load) {
+    const dir = new THREE.Vector3(data.load[0], data.load[1], data.load[2]).normalize();
+    const accent = new THREE.Color(data.theme.accent);
+    for (const y of [-0.6, 0, 0.6])
+      for (const z of [-0.6, 0, 0.6]) {
+        const tip = P(-0.015, y * H, z * H, d0);
+        const L = 0.22;
+        st.dynamic.add(new THREE.ArrowHelper(dir, tip.clone().addScaledVector(dir, -L), L, accent, 0.05, 0.03));
+      }
+  }
   addLabel(st, data.loadLabel, P(-0.2, H * 1.15, 0, d0), data.theme.accent);
 
   // --- оси координат
@@ -278,10 +288,11 @@ function addLabel(st: State, text: string, pos: THREE.Vector3, color: string) {
 }
 
 /** Сбросить камеру в исходное положение. */
-export function resetView() {
-  if (!S) return;
-  S.camera.position.set(0.95, 0.75, 2.05);
-  S.controls.target.set(0, 0, 0);
-  S.controls.update();
-  render(S);
+export function resetView(container: HTMLElement) {
+  const st = views.get(container);
+  if (!st) return;
+  st.camera.position.set(0.95, 0.75, 2.05);
+  st.controls.target.set(0, 0, 0);
+  st.controls.update();
+  render(st);
 }

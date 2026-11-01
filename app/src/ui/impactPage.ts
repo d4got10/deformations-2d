@@ -868,7 +868,7 @@ function buildViewToggle() {
       reset.hidden = st.view !== '3d';
       draw();
     });
-  reset.addEventListener('click', () => view3d?.resetView());
+  reset.addEventListener('click', () => view3d?.resetView($('i-3d')));
 }
 
 function drawXt() {

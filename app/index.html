@@ -57,7 +57,13 @@
         <aside id="s-controls"></aside>
         <section>
           <div class="scene-wrap">
+            <div class="view-toggle seg" role="group" aria-label="Вид">
+              <button id="s-view-2d" data-view="2d" aria-pressed="true">2D сечение</button>
+              <button id="s-view-3d" data-view="3d" aria-pressed="false">3D</button>
+              <button id="s-view-reset" title="Вернуть камеру" hidden>⟲ камера</button>
+            </div>
             <canvas id="s-scene" class="strip" aria-label="Сечение материала в выбранный момент времени"></canvas>
+            <div id="s-3d" class="view3d series3d" hidden></div>
           </div>
           <div class="scene-wrap xt-wrap">
             <canvas id="s-xt" class="xt" aria-label="Диаграмма x–t"></canvas>

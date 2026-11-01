@@ -95,6 +95,26 @@ try {
     if (dashed < 4) fail(`нет точного решения на профилях: ${dashed}`);
     await page.selectOption('#s-field', 's');
     await page.screenshot({ path: `${outDir}/series-${scheme}.png`, fullPage: true });
+    // 3D-вид серии: отдельный экземпляр, 2D-холст скрыт
+    await page.click('#s-view-3d');
+    await page.waitForSelector('#s-3d canvas');
+    await page.waitForTimeout(700);
+    const s3 = await page.evaluate(() => {
+      const c = document.querySelector('#s-3d canvas');
+      const tmp = document.createElement('canvas');
+      tmp.width = 120;
+      tmp.height = 80;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(c, 0, 0, 120, 80);
+      const d = ctx.getImageData(0, 0, 120, 80).data;
+      const set = new Set();
+      for (let i = 0; i < d.length; i += 4) set.add((d[i] >> 4) * 256 + (d[i + 1] >> 4) * 16 + (d[i + 2] >> 4));
+      return { n: set.size, strip: document.getElementById('s-scene').offsetParent !== null };
+    });
+    if (s3.n < 12) fail(`3D серии почти пустой: ${s3.n}`);
+    if (s3.strip) fail('2D-полоса не скрыта в режиме 3D');
+    await page.screenshot({ path: `${outDir}/series-3d-${scheme}.png`, fullPage: false });
+    await page.click('#s-view-2d');
 
     // ---------- §3.2 ----------
     await page.click('#tab-load');
