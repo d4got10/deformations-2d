@@ -88,6 +88,8 @@ export interface FrontsFrame {
   t: number;
   /** Положения фронтов (по возрастанию) и состояния между ними (states.length = xs.length + 1). */
   xs: number[];
+  /** Скорости фронтов в этот момент (до следующего события положения меняются линейно). */
+  speeds: number[];
   states: State[];
   ub: number;
 }
@@ -595,7 +597,7 @@ function trackOnce(prob: FrontsProblem): FrontsResult {
     return { left: res.slow.behind, seq };
   };
 
-  const snapshot = () => frames.push({ t, xs: fronts.map((f) => f.x), states: states.map((s) => ({ F: [...s.F] as V2, v: [...s.v] as V2 })), ub });
+  const snapshot = () => frames.push({ t, xs: fronts.map((f) => f.x), speeds: fronts.map((f) => f.speed), states: states.map((s) => ({ F: [...s.F] as V2, v: [...s.v] as V2 })), ub });
 
   // начальная краевая задача
   const changes = [...new Set(prob.pulses.flatMap((p) => [p.start, p.start + p.duration]))].filter((x) => x >= 0 && x < prob.tEnd).sort((a, b) => a - b);

@@ -73,6 +73,10 @@ const st = {
   xView: 1,
   /** Метод фронтов: считать, пока фронты ещё могут встретиться. */
   untilQuiet: true,
+  /** Окно диаграммы x–t при масштабировании (null — весь расчёт). */
+  xtWin: null as null | { x0: number; x1: number; t0: number; t1: number },
+  /** Точка, выбранная щелчком на диаграмме x–t (с подписью). */
+  xtPick: null as null | { x: number; t: number; lines: string[] },
   field: 'p' as FieldKey,
   magnify: 100,
   /** Увеличение поперечных (сдвиговых) перемещений — при нормальном ударе они в сотни раз меньше. */
@@ -388,6 +392,8 @@ async function compute() {
     st.fronts = fronts;
     st.tEnd = fronts ? fronts.tEnd : st.tBase;
     st.xView = fronts ? fronts.xView : 1;
+    st.xtWin = null;
+    st.xtPick = null;
     st.t = Math.min(st.t, st.tEnd);
     st.ms = ms;
     st.computing = 0;
@@ -415,14 +421,14 @@ async function compute() {
         renderStatus();
       }
     };
-    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames, untilQuiet: st.untilQuiet } });
+    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet } });
     else worker.postMessage({ id, method: 'fv', prob });
   } catch {
     // запасной путь — в основном потоке
     const t0 = performance.now();
     if (st.method === 'fronts') {
       const { trackFronts } = await import('../core/fronts.ts');
-      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames, untilQuiet: st.untilQuiet });
+      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet });
       done(framesFromFronts(fr), performance.now() - t0, fr);
     } else {
       const { simulate } = await import('../core/fv1d.ts');
@@ -431,11 +437,15 @@ async function compute() {
   }
 }
 
+/** Сколько моментов сохраняет метод фронтов (по ним строится точный фон диаграммы x–t). */
+const FRONT_FRAMES = 1201;
+
 /** Перевести кусочно-постоянное решение метода фронтов в кадры на сетке (для общих графиков). */
 function framesFromFronts(fr: FrontsResult): SeriesResult {
   const N = 1000;
   const dx = fr.xView / N;
-  const frames = fr.frames.map((f) => {
+  // для сечения, профилей и 3D хватает каждого 5-го момента; точная диаграмма x–t строится по всем
+  const frames = fr.frames.filter((_, k) => k % 5 === 0 || k === fr.frames.length - 1).map((f) => {
     const U = new Float32Array(6 * N);
     for (let i = 0; i < N; i++) {
       const s = stateAt(f, (i + 0.5) * dx);
@@ -542,6 +552,269 @@ function frameAt(t: number) {
   return r.frames[k];
 }
 
+let exactCache: { key: string; img: HTMLCanvasElement } | null = null;
+
+/**
+ * Точный фон диаграммы x–t для метода фронтов: решение кусочно-постоянное, поэтому состояние в
+ * точке (x, t) берётся из ближайшего предыдущего сохранённого момента, в котором фронты сдвинуты
+ * со своими скоростями до t. Растр строится под текущее окно с разрешением экрана.
+ */
+function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t: number; b: number }, w: number, h: number, win: { x0: number; x1: number; t0: number; t1: number }) {
+  const fr = st.fronts!;
+  const pw = Math.max(1, Math.round(w - m.l - m.r));
+  const ph = Math.max(1, Math.round(h - m.t - m.b));
+  const key = [win.x0, win.x1, win.t0, win.t1, pw, ph, st.field, reqId, css('--panel'), fieldMax].join('|');
+  if (!exactCache || exactCache.key !== key) {
+    const img = document.createElement('canvas');
+    img.width = pw;
+    img.height = ph;
+    const ic = img.getContext('2d')!;
+    const data = ic.createImageData(pw, ph);
+    const base = parseColor(css('--panel'));
+    const nF = fr.frames.length;
+    const T = fr.tEnd;
+    for (let row = 0; row < ph; row++) {
+      const t = win.t1 - ((row + 0.5) / ph) * (win.t1 - win.t0);
+      const k = Math.max(0, Math.min(nF - 1, Math.floor((t / T) * (nF - 1) + 1e-9)));
+      const f = fr.frames[k];
+      const dt = t - f.t;
+      const xs = f.xs.map((x, i) => x + f.speeds[i] * dt);
+      // цвет каждого состояния этого момента
+      const cols = f.states.map((sv) => diverging(fieldOf([sv.F[0], 0, sv.F[1]], [sv.v[0], 0, sv.v[1]]) / fieldMax, base));
+      let j = 0;
+      for (let col = 0; col < pw; col++) {
+        const x = win.x0 + ((col + 0.5) / pw) * (win.x1 - win.x0);
+        while (j < xs.length && xs[j] < x) j++;
+        const [R, G, B] = cols[j];
+        const o = 4 * (row * pw + col);
+        data.data[o] = R;
+        data.data[o + 1] = G;
+        data.data[o + 2] = B;
+        data.data[o + 3] = 255;
+      }
+    }
+    ic.putImageData(data, 0, 0);
+    exactCache = { key, img };
+  }
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(exactCache.img, m.l, m.t, w - m.l - m.r, h - m.t - m.b);
+}
+
+/** Текущее окно диаграммы x–t. */
+function xtWindow() {
+  return st.xtWin ?? { x0: 0, x1: st.xView, t0: 0, t1: st.tEnd };
+}
+let xtGeom: { m: { l: number; r: number; t: number; b: number }; w: number; h: number } | null = null;
+
+/** Деления оси на отрезке [a, b]. */
+function rangeTicks(a: number, b: number): number[] {
+  const raw = (b - a) / 5;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((k) => k * mag).find((v) => v >= raw) ?? raw;
+  const out: number[] = [];
+  for (let v = Math.ceil(a / step) * step; v <= b + 1e-12 * (b - a); v += step) out.push(+v.toPrecision(10));
+  return out;
+}
+
+/** Ограничить окно пределами расчёта и минимальным размером. */
+function clampWin(wn: { x0: number; x1: number; t0: number; t1: number }) {
+  const minX = st.xView / 5000;
+  const minT = st.tEnd / 5000;
+  let { x0, x1, t0, t1 } = wn;
+  if (x1 - x0 < minX) [x0, x1] = [(x0 + x1) / 2 - minX / 2, (x0 + x1) / 2 + minX / 2];
+  if (t1 - t0 < minT) [t0, t1] = [(t0 + t1) / 2 - minT / 2, (t0 + t1) / 2 + minT / 2];
+  const sx = Math.min(x1 - x0, st.xView);
+  const sT = Math.min(t1 - t0, st.tEnd);
+  x0 = Math.max(0, Math.min(x0, st.xView - sx));
+  t0 = Math.max(0, Math.min(t0, st.tEnd - sT));
+  const full = sx >= st.xView - 1e-12 && sT >= st.tEnd - 1e-12;
+  st.xtWin = full ? null : { x0, x1: x0 + sx, t0, t1: t0 + sT };
+}
+
+/** Перевести координаты экрана в (x, t) диаграммы. */
+function xtAt(px: number, py: number) {
+  const g = xtGeom!;
+  const win = xtWindow();
+  const fx = (px - g.m.l) / (g.w - g.m.l - g.m.r);
+  const ft = (g.h - g.m.b - py) / (g.h - g.m.t - g.m.b);
+  return { x: win.x0 + fx * (win.x1 - win.x0), t: win.t0 + ft * (win.t1 - win.t0), fx, ft };
+}
+
+function zoomXt(factor: number, px?: number, py?: number) {
+  const g = xtGeom;
+  if (!g) return;
+  const win = xtWindow();
+  const c = px === undefined ? { x: (win.x0 + win.x1) / 2, t: (win.t0 + win.t1) / 2 } : xtAt(px, py!);
+  clampWin({ x0: c.x - (c.x - win.x0) / factor, x1: c.x + (win.x1 - c.x) / factor, t0: c.t - (c.t - win.t0) / factor, t1: c.t + (win.t1 - c.t) / factor });
+  drawXt();
+}
+
+function setupXtZoom() {
+  const cv = $<HTMLCanvasElement>('s-xt');
+  cv.style.touchAction = 'none';
+  cv.style.cursor = 'crosshair';
+  cv.addEventListener(
+    'wheel',
+    (e) => {
+      if (!st.res) return;
+      e.preventDefault();
+      const r = cv.getBoundingClientRect();
+      zoomXt(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+    },
+    { passive: false },
+  );
+  // перетаскивание — сдвиг, щипок — масштаб, щелчок без движения — выбрать момент времени
+  const pts = new Map<number, { x: number; y: number }>();
+  let moved = false;
+  let pinch0 = 0;
+  cv.addEventListener('pointerdown', (e) => {
+    cv.setPointerCapture(e.pointerId);
+    const r = cv.getBoundingClientRect();
+    pts.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top });
+    moved = false;
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinch0 = Math.hypot(a.x - b.x, a.y - b.y);
+    }
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const prev = pts.get(e.pointerId);
+    if (!prev || !xtGeom || !st.res) return;
+    const r = cv.getBoundingClientRect();
+    const cur = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (Math.hypot(cur.x - prev.x, cur.y - prev.y) > 2) moved = true;
+    if (pts.size === 2) {
+      pts.set(e.pointerId, cur);
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch0 > 0) zoomXt(d / pinch0, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      pinch0 = d;
+      return;
+    }
+    const g = xtGeom;
+    const win = xtWindow();
+    const dx = ((cur.x - prev.x) / (g.w - g.m.l - g.m.r)) * (win.x1 - win.x0);
+    const dt = ((cur.y - prev.y) / (g.h - g.m.t - g.m.b)) * (win.t1 - win.t0);
+    pts.set(e.pointerId, cur);
+    if (st.xtWin) {
+      clampWin({ x0: win.x0 - dx, x1: win.x1 - dx, t0: win.t0 + dt, t1: win.t1 + dt });
+      cv.style.cursor = 'grabbing';
+      drawXt();
+    }
+  });
+  const end = (e: PointerEvent) => {
+    const p = pts.get(e.pointerId);
+    pts.delete(e.pointerId);
+    cv.style.cursor = 'crosshair';
+    if (pts.size < 2) pinch0 = 0;
+    if (!moved && p && xtGeom && st.res && pts.size === 0) {
+      const q = xtAt(p.x, p.y);
+      if (q.fx >= 0 && q.fx <= 1 && q.ft >= 0 && q.ft <= 1) pickXt(p.x, p.y, q.x, q.t);
+    }
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
+  cv.addEventListener('dblclick', () => {
+    st.xtWin = null;
+    drawXt();
+  });
+  // кнопки
+  const box = document.createElement('div');
+  box.className = 'zoom-ctrl';
+  for (const [label, title, fn] of [
+    ['+', 'приблизить', () => zoomXt(1.6)],
+    ['−', 'отдалить', () => zoomXt(1 / 1.6)],
+    ['⤢', 'весь вид', () => ((st.xtWin = null), drawXt())],
+  ] as [string, string, () => void][]) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.addEventListener('click', fn);
+    box.appendChild(b);
+  }
+  cv.parentElement!.appendChild(box);
+}
+
+const FAM_NAME = { fast: 'квазипродольный', slow: 'квазипоперечный' } as const;
+
+/**
+ * Щелчок по диаграмме: если рядом точка события (встреча фронтов, рождение на границе, отражение) —
+ * берётся она; если рядом фронт — показываются его характеристики; иначе — просто (x, t).
+ * Время анимации переводится на выбранный момент.
+ */
+function pickXt(px: number, py: number, x: number, t: number) {
+  const g = xtGeom!;
+  const win = xtWindow();
+  const toPx = (xx: number, tt: number) => [
+    g.m.l + ((xx - win.x0) / (win.x1 - win.x0)) * (g.w - g.m.l - g.m.r),
+    g.h - g.m.b - ((tt - win.t0) / (win.t1 - win.t0)) * (g.h - g.m.t - g.m.b),
+  ];
+  let pick = { x, t, lines: [`t c1/L = ${fmt(t, 4)}`, `x1/L = ${fmt(x, 4)}`] };
+  const segs = st.fronts?.segments ?? [];
+  if (segs.length && st.showFronts) {
+    // 1) события — начала отрезков фронтов (рождение на границе, встреча, отражение)
+    const maxStr = Math.max(...segs.map((sg) => sg.strength), 1e-30);
+    const visible = (sg: Segment) => st.weakFronts || sg.strength / maxStr >= 1e-4;
+    let best: Segment | null = null;
+    let bestD = 9; // пикселей
+    for (const sg of segs) {
+      if (!visible(sg) || sg.t0 <= 1e-12) continue;
+      const [ex, ey] = toPx(sg.x0, sg.t0);
+      const d = Math.hypot(ex - px, ey - py);
+      if (d < bestD) {
+        bestD = d;
+        best = sg;
+      }
+    }
+    if (best) {
+      const at = segs.filter((sg) => Math.abs(sg.t0 - best!.t0) < 1e-9 && Math.abs(sg.x0 - best!.x0) < 1e-9 && visible(sg));
+      const where = best.x0 < 1e-9 ? 'у границы x1 = 0' : 'встреча фронтов';
+      const born = at.map((sg) => `${FAM_NAME[sg.fam]} ${sg.x1 >= sg.x0 ? '→' : '←'}`);
+      pick = {
+        x: best.x0,
+        t: best.t0,
+        lines: [`${where}: t c1/L = ${fmt(best.t0, 4)}`, `x1/L = ${fmt(best.x0, 4)}`, `выходят: ${[...new Set(born)].join(', ')}`],
+      };
+    } else {
+      // 2) ближайший фронт (отрезок)
+      let fb: Segment | null = null;
+      let fd = 6;
+      for (const sg of segs) {
+        if (!visible(sg)) continue;
+        const [ax, ay] = toPx(sg.x0, sg.t0);
+        const [bx, by] = toPx(sg.x1, sg.t1);
+        const L2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
+        const u = Math.max(0, Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / L2));
+        const d = Math.hypot(ax + u * (bx - ax) - px, ay + u * (by - ay) - py);
+        if (d < fd) {
+          fd = d;
+          fb = sg;
+        }
+      }
+      if (fb) {
+        const G = (fb.x1 - fb.x0) / (fb.t1 - fb.t0);
+        const tt = Math.max(fb.t0, Math.min(fb.t1, t));
+        pick = {
+          x: fb.x0 + G * (tt - fb.t0),
+          t: tt,
+          lines: [
+            `${FAM_NAME[fb.fam]} фронт${fb.kind === 'simple' ? ' (пучок простой волны)' : ' (ударный)'}, ${G >= 0 ? 'вглубь' : 'к границе'}`,
+            `скорость ${fmt(Math.abs(G), 4)} c1, скачок деформации ${fb.strength.toExponential(1)}`,
+            `t c1/L = ${fmt(tt, 4)}, x1/L = ${fmt(fb.x0 + G * (tt - fb.t0), 4)}`,
+            `рождён при t = ${fmt(fb.t0, 4)}`,
+          ],
+        };
+      }
+    }
+  }
+  st.xtPick = pick;
+  st.playing = false;
+  st.t = Math.max(0, Math.min(st.tEnd, pick.t));
+  syncPlay();
+  drawAll();
+}
+
 /** Круглые деления оси от 0 до max (4–6 штук). */
 function axisTicks(max: number): number[] {
   const raw = max / 5;
@@ -623,10 +896,21 @@ function drawXt() {
     ic.putImageData(data, 0, 0);
     heatCache = { key, img };
   }
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(heatCache.img, m.l, m.t, w - m.l - m.r, h - m.t - m.b);
-  const X = (x: number) => m.l + (x / st.xView) * (w - m.l - m.r);
-  const Y = (t: number) => h - m.b - (t / st.tEnd) * (h - m.t - m.b);
+  const win = xtWindow();
+  xtGeom = { m, w, h };
+  // фон — кусок растра поля, соответствующий окну (фронты сверху рисуются векторно и остаются чёткими)
+  const img = heatCache.img;
+  const sx = (win.x0 / st.xView) * img.width;
+  const sw = ((win.x1 - win.x0) / st.xView) * img.width;
+  const sy = (1 - win.t1 / st.tEnd) * img.height;
+  const sh = ((win.t1 - win.t0) / st.tEnd) * img.height;
+  if (st.fronts) drawExactXt(ctx, m, w, h, win);
+  else {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, sx, sy, sw, sh, m.l, m.t, w - m.l - m.r, h - m.t - m.b);
+  }
+  const X = (x: number) => m.l + ((x - win.x0) / (win.x1 - win.x0)) * (w - m.l - m.r);
+  const Y = (t: number) => h - m.b - ((t - win.t0) / (win.t1 - win.t0)) * (h - m.t - m.b);
   ctx.strokeStyle = css('--border');
   ctx.strokeRect(m.l, m.t, w - m.l - m.r, h - m.t - m.b);
   ctx.font = '600 12px system-ui, sans-serif';
@@ -634,8 +918,14 @@ function drawXt() {
   ctx.fillText(`Диаграмма x–t: ${FIELD_LABELS[st.field]}`, 10, 16);
   ctx.font = '11px system-ui, sans-serif';
   ctx.fillStyle = css('--muted');
-  for (const t of axisTicks(st.tEnd)) ctx.fillText(fmt(t, 2), 14, Y(t) + 4);
-  for (const x of axisTicks(st.xView)) ctx.fillText(fmt(x, 2), X(x) - 10, h - m.b + 14);
+  for (const t of rangeTicks(win.t0, win.t1)) ctx.fillText(fmt(t, 3), 6, Y(t) + 4);
+  for (const x of rangeTicks(win.x0, win.x1)) ctx.fillText(fmt(x, 3), X(x) - 12, h - m.b + 14);
+  const zoom = Math.min(st.xView / (win.x1 - win.x0), st.tEnd / (win.t1 - win.t0));
+  if (zoom > 1.001) {
+    ctx.textAlign = 'right';
+    ctx.fillText(`увеличение ×${fmt(zoom, 3)} · двойной щелчок — весь вид`, w - m.r, 16);
+    ctx.textAlign = 'left';
+  }
   ctx.fillText('x1 / L', w - m.r - 34, h - 6);
   ctx.save();
   ctx.translate(12, (m.t + h - m.b) / 2 + 30);
@@ -675,13 +965,18 @@ function drawXt() {
     ctx.globalAlpha = 1;
     ctx.restore();
   }
-  // импульсы на оси времени
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(m.l - 8, m.t, w - m.l - m.r + 8, h - m.t - m.b);
+  ctx.clip();
+  // импульсы на оси времени (видны, только если граница x = 0 в окне)
   ctx.fillStyle = css('--accent');
-  for (const p of st.pulses) {
-    const y1 = Y(Math.min(st.tEnd, p.start));
-    const y2 = Y(Math.min(st.tEnd, p.start + p.duration));
-    ctx.fillRect(m.l - 6, y2, 4, Math.max(1.5, y1 - y2));
-  }
+  if (win.x0 <= 1e-12)
+    for (const p of st.pulses) {
+      const y1 = Y(Math.min(st.tEnd, p.start));
+      const y2 = Y(Math.min(st.tEnd, p.start + p.duration));
+      ctx.fillRect(m.l - 6, y2, 4, Math.max(1.5, y1 - y2));
+    }
   // текущее время
   ctx.strokeStyle = css('--text');
   ctx.setLineDash([3, 3]);
@@ -690,6 +985,36 @@ function drawXt() {
   ctx.lineTo(w - m.r, Y(st.t));
   ctx.stroke();
   ctx.setLineDash([]);
+  ctx.restore();
+  // выбранная точка
+  if (st.xtPick) {
+    const px = X(st.xtPick.x);
+    const py = Y(st.xtPick.t);
+    if (px >= m.l - 2 && px <= w - m.r + 2 && py >= m.t - 2 && py <= h - m.b + 2) {
+      ctx.strokeStyle = css('--text');
+      ctx.fillStyle = css('--panel');
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(px, py, 5, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = '12px system-ui, sans-serif';
+      const lw = Math.max(...st.xtPick.lines.map((ln) => ctx.measureText(ln).width)) + 14;
+      const lh = 16 * st.xtPick.lines.length + 8;
+      let bx = px + 10;
+      let by = py - lh - 8;
+      if (bx + lw > w - m.r) bx = px - lw - 10;
+      if (by < m.t) by = py + 10;
+      ctx.globalAlpha = 0.94;
+      ctx.fillRect(bx, by, lw, lh);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = css('--border');
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx, by, lw, lh);
+      ctx.fillStyle = css('--text');
+      st.xtPick.lines.forEach((ln, i) => ctx.fillText(ln, bx + 7, by + 18 + 16 * i));
+    }
+  }
   // легенда
   const lx = w - m.r - 150;
   ctx.fillStyle = css('--panel');
@@ -1002,6 +1327,7 @@ function loop(t: number) {
 
 buildControls();
 buildViewToggle();
+setupXtZoom();
 compute();
 new ResizeObserver(() => drawAll()).observe($('s-scene'));
 new ResizeObserver(() => st.view === '3d' && drawAll()).observe($('s-3d'));

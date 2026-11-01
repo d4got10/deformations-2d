@@ -89,6 +89,25 @@ try {
     await page.screenshot({ path: `${outDir}/series-fronts-${scheme}.png`, fullPage: false });
     if (ser.n < 100) fail(`серия ударов: мало кадров ${ser.n}`);
     if (!(ser.w >= ser.e)) fail('серия ударов: прирост энергии больше работы границы');
+    // масштабирование диаграммы x–t и выбор точки щелчком
+    {
+      const box = await page.locator('#s-xt').boundingBox();
+      const cx = box.x + box.width * 0.4;
+      const cy = box.y + box.height * 0.6;
+      await page.mouse.move(cx, cy);
+      await page.mouse.wheel(0, -600);
+      await page.waitForTimeout(150);
+      if (!(await page.evaluate(() => window.__series.xtWin))) fail('колесо мыши не приблизило диаграмму x–t');
+      await page.mouse.click(cx, cy);
+      await page.waitForTimeout(150);
+      const pk = await page.evaluate(() => ({ pick: window.__series.xtPick, t: window.__series.t, playing: window.__series.playing }));
+      if (!pk.pick) fail('щелчок не выбрал точку на диаграмме');
+      else if (Math.abs(pk.t - pk.pick.t) > 1e-9 || pk.playing) fail('щелчок не перевёл время анимации на выбранный момент');
+      await page.locator('#s-xt').screenshot({ path: `${outDir}/xt-zoom-pick-${scheme}.png` });
+      await page.mouse.dblclick(cx, cy);
+      await page.waitForTimeout(150);
+      if (await page.evaluate(() => window.__series.xtWin)) fail('двойной щелчок не вернул весь вид');
+    }
     // растяжение: шаблон «сжатие → растяжение → сжатие», слабые фронты
     await page.selectOption('#s-pulse-preset', 'Сжатие → растяжение → сжатие');
     await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts && window.__series.pulses.some((p) => p.d < 0), null, { timeout: 60000 });
