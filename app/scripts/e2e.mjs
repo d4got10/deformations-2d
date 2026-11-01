@@ -139,8 +139,20 @@ try {
       r.dispatchEvent(new Event('input'));
     });
     await page.waitForTimeout(300);
-    const dashed = await page.locator('#s-profiles polyline[stroke-dasharray="5 4"]').count();
-    if (dashed < 4) fail(`нет точного решения на профилях: ${dashed}`);
+    if ((await page.locator('#s-profiles canvas').count()) !== 4) fail('профилей серии должно быть 4');
+    const nser = await page.evaluate(() => window.__profSeries);
+    if (nser !== 2) fail(`нет точного решения на профилях: серий ${nser}`);
+    // масштаб профилей колесом
+    {
+      const pb = await page.locator('#s-profiles canvas').first().boundingBox();
+      await page.mouse.move(pb.x + pb.width * 0.3, pb.y + pb.height * 0.5);
+      await page.mouse.wheel(0, -500);
+      await page.waitForTimeout(100);
+      if (!(await page.evaluate(() => window.__profWin))) fail('колесо не приблизило профили');
+      await page.mouse.dblclick(pb.x + pb.width * 0.3, pb.y + pb.height * 0.5);
+      await page.waitForTimeout(100);
+      if (await page.evaluate(() => window.__profWin)) fail('двойной щелчок не вернул весь вид профилей');
+    }
     await page.selectOption('#s-field', 's');
     await page.screenshot({ path: `${outDir}/series-${scheme}.png`, fullPage: true });
     // 3D-вид серии: отдельный экземпляр, 2D-холст скрыт

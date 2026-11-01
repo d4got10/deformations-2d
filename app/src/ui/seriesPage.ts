@@ -9,7 +9,8 @@ import { profileAt, solveImpact } from '../core/impact.ts';
 import { type Material, normalize } from '../core/material.ts';
 import { type Vec3, traction } from '../core/material1d.ts';
 import { MATERIAL_1, MATERIAL_2 } from '../core/presets.ts';
-import { type Series, fmt, lineChart } from './charts.ts';
+import { fmt, lineChart } from './charts.ts';
+import { type PlotSeries, type SharedX, createProfilePlot } from './profilePlot.ts';
 
 type FieldKey = 'p' | 's' | 'v1' | 's11';
 const FIELD_LABELS: Record<FieldKey, string> = {
@@ -393,6 +394,7 @@ async function compute() {
     st.tEnd = fronts ? fronts.tEnd : st.tBase;
     st.xView = fronts ? fronts.xView : 1;
     st.xtWin = null;
+    profShared.win = null;
     st.xtPick = null;
     st.t = Math.min(st.t, st.tEnd);
     st.ms = ms;
@@ -1007,7 +1009,6 @@ function computeFieldMax() {
 }
 
 let heatCache: { key: string; img: HTMLCanvasElement } | null = null;
-let lastProfileT = -1;
 
 function drawXt() {
   const canvas = $<HTMLCanvasElement>('s-xt');
@@ -1392,47 +1393,64 @@ function exactFirst(t: number) {
   }
 }
 
+const profShared: SharedX = { win: null, full: () => [0, st.xView], redraw: () => renderProfiles() };
+let profPlots: ReturnType<typeof createProfilePlot>[] = [];
+const PROFILE_ITEMS: [string, (F: Vec3, v: Vec3) => number][] = [
+  ['p = u1,1', (F) => F[0]],
+  ['s = u3,1', (F) => F[2]],
+  ['v1 / c1', (_F, v) => v[0]],
+  ['σ11 / (λ+2μ)', (F) => traction(normalize(st.material), F)[0]],
+];
+
+/**
+ * Профили в текущий момент. Для метода фронтов — точная ступенчатая функция по положениям фронтов
+ * в момент t, для КО — значения в ячейках; точное решение §2.3 — функцией. Перерисовка дешёвая,
+ * поэтому выполняется в каждом кадре анимации.
+ */
 function renderProfiles() {
   const box = $('s-profiles');
-  box.innerHTML = '';
+  if (!profPlots.length) {
+    box.innerHTML = '';
+    profPlots = PROFILE_ITEMS.map(([title]) => createProfilePlot(box, title, 'x1 / L', profShared));
+  }
   if (!st.res) return;
   const r = st.res;
-  const fr = storedFrameAt(st.t);
-  const xs: number[] = [];
-  const step = Math.max(1, Math.round(r.N / 500));
-  for (let i = 0; i < r.N; i += step) xs.push((i + 0.5) * r.dx);
-  const m = normalize(st.material);
-  const ex = exactFirst(fr.t);
-  const items: [string, (F: Vec3, v: Vec3) => number][] = [
-    ['p = u1,1', (F) => F[0]],
-    ['s = u3,1', (F) => F[2]],
-    ['v1 / c1', (_F, v) => v[0]],
-    ['σ11 / (λ+2μ)', (F) => traction(m, F)[0]],
-  ];
+  const t = st.t;
+  const ex = exactFirst(t);
   const acc = css('--accent');
   const muted = css('--muted');
-  for (const [title, f] of items) {
-    const ys = xs.map((_, j) => {
-      const c = cell(fr, r.N, j * step);
-      return f(c.F, c.v);
-    });
-    const series: Series[] = [{ label: st.fronts ? 'метод фронтов' : 'конечные объёмы', x: xs, y: ys, color: acc }];
-    if (ex) {
-      const ey = xs.map((x) => {
-        const q = profileAt(ex, x / fr.t);
-        return f(q.F, q.v);
-      });
-      series.push({ label: 'точное (§2.3)', x: xs, y: ey, color: muted, dash: '5 4' });
-    }
-    const chart = lineChart({ xLabel: 'x1 / L', yLabel: title, series, allowNegative: true, height: 230, width: 520, xRange: [0, st.xView] });
-    box.appendChild(chart);
+  let edges: number[];
+  let states: { F: Vec3; v: Vec3 }[];
+  if (st.fronts) {
+    const { f, xs } = frontsAt(t);
+    edges = xs;
+    states = f.states.map((sv) => ({ F: [sv.F[0], 0, sv.F[1]] as Vec3, v: [sv.v[0], 0, sv.v[1]] as Vec3 }));
+  } else {
+    const fr = storedFrameAt(t);
+    edges = Array.from({ length: r.N - 1 }, (_, i) => (i + 1) * r.dx);
+    states = Array.from({ length: r.N }, (_, i) => cell(fr, r.N, i));
   }
+  PROFILE_ITEMS.forEach(([, fn], k) => {
+    const series: PlotSeries[] = [{ label: st.fronts ? 'метод фронтов' : 'конечные объёмы', color: acc, steps: { edges, vals: states.map((q) => fn(q.F, q.v)) } }];
+    if (ex && t > 0)
+      series.push({
+        label: 'точное (§2.3)',
+        color: muted,
+        dash: [5, 4],
+        fn: (x) => {
+          const q = profileAt(ex, Math.max(0, x) / t);
+          return fn(q.F, q.v);
+        },
+      });
+    profPlots[k].draw(series);
+  });
+  // для браузерного теста
+  Object.assign(window, { __profSeries: ex && t > 0 ? 2 : 1, __profWin: profShared.win });
 }
 
 function renderStatic() {
   computeFieldMax();
   heatCache = null;
-  lastProfileT = -1; // новый результат — профили перерисовать
   // график скорости границы
   const box = $('s-boundary');
   box.innerHTML = '';
@@ -1454,11 +1472,7 @@ function drawAll() {
   if (!st.res) return;
   drawStrip();
   drawXt();
-  const fr = storedFrameAt(st.t); // графики профилей обновляются по сохранённым кадрам — это дорого
-  if (fr.t !== lastProfileT) {
-    lastProfileT = fr.t;
-    renderProfiles();
-  }
+  renderProfiles();
 }
 
 let lastT = 0;

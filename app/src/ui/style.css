@@ -558,3 +558,37 @@ canvas.xt {
   background: var(--panel);
   opacity: 0.92;
 }
+
+/* профили в выбранный момент: по два в ряду, масштабируемые */
+#s-profiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 760px) {
+  #s-profiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.prof-plot {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.prof-plot canvas {
+  display: block;
+  width: 100%;
+  height: min(42vh, 320px);
+}
+.prof-plot .zoom-ctrl {
+  left: auto;
+  right: 8px;
+  top: 5px;
+}
+.prof-plot .zoom-ctrl button {
+  width: 26px;
+  height: 24px;
+  font-size: 14px;
+}
