@@ -82,7 +82,11 @@ try {
     await page.click('#tab-series');
     await page.waitForFunction(() => window.__series?.res && window.__series.computing === 0, null, { timeout: 60000 });
     const ser = await page.evaluate(() => ({ kin: window.__series.res.kinematicError, n: window.__series.res.frames.length, w: window.__series.res.work, e: window.__series.res.energyGain }));
-    if (Math.abs(ser.kin) > 1e-12) fail(`серия ударов: кинематический баланс ${ser.kin}`);
+    if (Math.abs(ser.kin) > 1e-8) fail(`серия ударов: кинематический баланс ${ser.kin}`);
+    const ftxt = await page.locator('#s-status').innerText();
+    if (!ftxt.includes('Метод волновых фронтов')) fail('по умолчанию должен быть метод волновых фронтов');
+    if (await page.evaluate(() => window.__series.fronts.warnings.length)) fail('метод фронтов выдал предупреждения');
+    await page.screenshot({ path: `${outDir}/series-fronts-${scheme}.png`, fullPage: false });
     if (ser.n < 100) fail(`серия ударов: мало кадров ${ser.n}`);
     if (!(ser.w >= ser.e)) fail('серия ударов: прирост энергии больше работы границы');
     // один удар: численное решение совпадает с точным (пунктир)

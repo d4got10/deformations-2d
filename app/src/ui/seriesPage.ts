@@ -3,6 +3,7 @@
  * Решение нестационарное (волны разных ударов догоняют друг друга) — считается численно (fv1d.ts),
  * а до встречи волн сравнивается с точным автомодельным решением главы 2.
  */
+import { type FrontsResult, type Segment, stateAt } from '../core/fronts.ts';
 import { type Pulse, type SeriesProblem, type SeriesResult, boundaryVelocity, cell } from '../core/fv1d.ts';
 import { profileAt, solveImpact } from '../core/impact.ts';
 import { type Material, normalize } from '../core/material.ts';
@@ -59,6 +60,10 @@ const st = {
   speed: 0.12,
   t: 0.6,
   res: null as SeriesResult | null,
+  /** 'fronts' — метод волновых фронтов (как в диссертации), 'fv' — конечные объёмы (для сравнения). */
+  method: 'fronts' as 'fronts' | 'fv',
+  showFronts: true,
+  fronts: null as FrontsResult | null,
   ms: 0,
   computing: 0,
   error: '',
@@ -177,6 +182,27 @@ function buildControls() {
   renderPulses();
 
   const fsN = fieldset(c, 'Расчёт и отображение');
+  const msel = document.createElement('select');
+  msel.add(new Option('волновые фронты (как в диссертации)', 'fronts'));
+  msel.add(new Option('конечные объёмы (для сравнения)', 'fv'));
+  msel.value = st.method;
+  msel.addEventListener('change', () => {
+    st.method = msel.value as typeof st.method;
+    schedule();
+  });
+  row(fsN, 'Метод', msel, 's-method');
+  const fl = document.createElement('label');
+  fl.className = 'check';
+  const fcb = document.createElement('input');
+  fcb.type = 'checkbox';
+  fcb.id = 's-show-fronts';
+  fcb.checked = st.showFronts;
+  fcb.addEventListener('change', () => {
+    st.showFronts = fcb.checked;
+    drawAll();
+  });
+  fl.append(fcb, 'фронты на диаграмме x–t');
+  fsN.appendChild(fl);
   const nsel = document.createElement('select');
   for (const n of [400, 800, 1600]) nsel.add(new Option(`${n} ячеек${n === 800 ? ' (по умолчанию)' : ''}`, String(n)));
   nsel.value = String(st.N);
@@ -184,7 +210,7 @@ function buildControls() {
     st.N = +nsel.value;
     schedule();
   });
-  row(fsN, 'Сетка', nsel, 's-grid');
+  row(fsN, 'Сетка (КО)', nsel, 's-grid');
   const fsel = document.createElement('select');
   for (const [k, v] of Object.entries(FIELD_LABELS)) fsel.add(new Option(v, k));
   fsel.addEventListener('change', () => {
@@ -288,9 +314,10 @@ async function compute() {
   st.computing = 0.001;
   renderStatus();
   const prob = problem();
-  const done = (res: SeriesResult, ms: number) => {
+  const done = (res: SeriesResult, ms: number, fronts: FrontsResult | null = null) => {
     if (id !== reqId) return;
     st.res = res;
+    st.fronts = fronts;
     st.ms = ms;
     st.computing = 0;
     autoMagnify();
@@ -307,20 +334,50 @@ async function compute() {
       if (msg.type === 'progress') {
         st.computing = msg.f;
         renderStatus();
-      } else if (msg.type === 'done') done(msg.res, msg.ms);
+      } else if (msg.type === 'done') {
+        if (msg.method === 'fronts') done(framesFromFronts(msg.res), msg.ms, msg.res);
+        else done(msg.res, msg.ms);
+      }
       else {
         st.error = msg.message;
         st.computing = 0;
         renderStatus();
       }
     };
-    worker.postMessage({ id, prob });
+    if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames } });
+    else worker.postMessage({ id, method: 'fv', prob });
   } catch {
     // запасной путь — в основном потоке
-    const { simulate } = await import('../core/fv1d.ts');
     const t0 = performance.now();
-    done(simulate(prob), performance.now() - t0);
+    if (st.method === 'fronts') {
+      const { trackFronts } = await import('../core/fronts.ts');
+      const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: prob.frames });
+      done(framesFromFronts(fr), performance.now() - t0, fr);
+    } else {
+      const { simulate } = await import('../core/fv1d.ts');
+      done(simulate(prob), performance.now() - t0);
+    }
   }
+}
+
+/** Перевести кусочно-постоянное решение метода фронтов в кадры на сетке (для общих графиков). */
+function framesFromFronts(fr: FrontsResult): SeriesResult {
+  const N = 1000;
+  const dx = 1 / N;
+  const frames = fr.frames.map((f) => {
+    const U = new Float32Array(6 * N);
+    for (let i = 0; i < N; i++) {
+      const s = stateAt(f, (i + 0.5) * dx);
+      U[i] = s.F[0];
+      U[N + i] = 0;
+      U[2 * N + i] = s.F[1];
+      U[3 * N + i] = s.v[0];
+      U[4 * N + i] = 0;
+      U[5 * N + i] = s.v[1];
+    }
+    return { t: f.t, U, ub: f.ub };
+  });
+  return { N, dx, frames, kinematicError: fr.kinematicError, work: fr.work, energyGain: fr.energyGain, steps: fr.events };
 }
 
 function autoMagnify() {
@@ -358,7 +415,16 @@ function renderStatus() {
   if (st.error) add('err', st.error);
   if (st.computing) add('info', `Расчёт… ${Math.round(st.computing * 100)}%`);
   const r = st.res;
-  if (r && !st.computing) {
+  const fr = st.fronts;
+  if (r && fr && !st.computing) {
+    add(
+      'info',
+      `Метод волновых фронтов: ${fr.events} событий (удары, остановки, встречи и отражения фронтов), до ${fr.maxFronts} фронтов одновременно, ${st.ms.toFixed(0)} мс. ` +
+        `На каждом фронте точно выполнены условия на разрывах (2.40)–(2.42); простые волны представлены пучками слабых фронтов. ` +
+        `Кинематический баланс ${fr.kinematicError.toExponential(1)}. Энергия: работа границы ${fmt(fr.work, 4)} = прирост энергии ${fmt(fr.energyGain, 4)} + диссипация на ударных фронтах (2.45) ${fmt(fr.dissipation, 3)} (расхождение ${(fr.work - fr.energyGain - fr.dissipation).toExponential(1)}).`,
+    );
+    for (const w of fr.warnings) add('err', w);
+  } else if (r && !st.computing) {
     const diss = r.work > 0 ? (r.work - r.energyGain) / r.work : 0;
     add(
       'info',
@@ -478,6 +544,28 @@ function drawXt() {
   ctx.rotate(-Math.PI / 2);
   ctx.fillText('t c1 / L', 0, 0);
   ctx.restore();
+  // фронты (метод волновых фронтов)
+  if (st.fronts && st.showFronts) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(m.l, m.t, w - m.l - m.r, h - m.t - m.b);
+    ctx.clip();
+    const segs = st.fronts.segments;
+    const maxStr = Math.max(...segs.map((sg) => sg.strength), 1e-30);
+    for (const sg of segs as Segment[]) {
+      const rel = sg.strength / maxStr;
+      if (rel < 1e-4) continue; // самые слабые отражения не загромождают картину
+      ctx.strokeStyle = sg.fam === 'fast' ? css('--front1') : css('--front2');
+      ctx.globalAlpha = sg.kind === 'simple' ? 0.55 : 0.95;
+      ctx.lineWidth = sg.kind === 'simple' ? 0.8 : Math.max(0.8, Math.min(2.2, 0.8 + 3 * Math.sqrt(rel)));
+      ctx.beginPath();
+      ctx.moveTo(X(sg.x0), Y(sg.t0));
+      ctx.lineTo(X(sg.x1), Y(sg.t1));
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
   // импульсы на оси времени
   ctx.fillStyle = css('--accent');
   for (const p of st.pulses) {
@@ -738,7 +826,7 @@ function renderProfiles() {
       const c = cell(fr, r.N, j * step);
       return f(c.F, c.v);
     });
-    const series: Series[] = [{ label: 'численное решение', x: xs, y: ys, color: acc }];
+    const series: Series[] = [{ label: st.fronts ? 'метод фронтов' : 'конечные объёмы', x: xs, y: ys, color: acc }];
     if (ex) {
       const ey = xs.map((x) => {
         const q = profileAt(ex, x / fr.t);
