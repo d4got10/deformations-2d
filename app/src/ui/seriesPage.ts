@@ -74,6 +74,8 @@ const st = {
   xView: 1,
   /** Метод фронтов: считать, пока фронты ещё могут встретиться. */
   untilQuiet: true,
+  /** Для КО в режиме «до затухания»: до какого момента и на какой длине считали. */
+  fvMeta: null as FvMeta | null,
   /** Шаг веера: скачок деформации на один луч простой волны (метод фронтов). */
   fanStep: 2.5e-4,
   /** Окно диаграммы x–t при масштабировании (null — весь расчёт). */
@@ -237,7 +239,7 @@ function buildControls() {
     st.untilQuiet = qcb.checked;
     schedule();
   });
-  ql.append(qcb, 'считать, пока фронты могут встретиться (метод фронтов)');
+  ql.append(qcb, 'считать, пока фронты могут встретиться (конечные объёмы — до того же момента)');
   fsN.appendChild(ql);
   const fanSel = document.createElement('select');
   for (const [v, l] of [
@@ -291,7 +293,7 @@ function buildControls() {
   sl.append(scb, 'простые волны (пучки) на профилях — плавно, а не набором ступенек');
   fsN.appendChild(sl);
   const nsel = document.createElement('select');
-  for (const n of [400, 800, 1600]) nsel.add(new Option(`${n} ячеек${n === 800 ? ' (по умолчанию)' : ''}`, String(n)));
+  for (const n of [400, 800, 1600]) nsel.add(new Option(`${n} ячеек на L${n === 800 ? ' (по умолчанию)' : ''}`, String(n)));
   nsel.value = String(st.N);
   nsel.addEventListener('change', () => {
     st.N = +nsel.value;
@@ -418,12 +420,13 @@ async function compute() {
   st.computing = 0.001;
   renderStatus();
   const prob = problem();
-  const done = (res: SeriesResult, ms: number, fronts: FrontsResult | null = null) => {
+  const done = (res: SeriesResult, ms: number, fronts: FrontsResult | null = null, meta: FvMeta | null = null) => {
     if (id !== reqId) return;
     st.res = res;
     st.fronts = fronts;
-    st.tEnd = fronts ? fronts.tEnd : st.tBase;
-    st.xView = fronts ? fronts.xView : 1;
+    st.fvMeta = meta;
+    st.tEnd = fronts ? fronts.tEnd : meta ? meta.tEnd : st.tBase;
+    st.xView = fronts ? fronts.xView : meta ? meta.length : 1;
     st.xtWin = null;
     profShared.win = null;
     st.xtPick = null;
@@ -446,7 +449,7 @@ async function compute() {
         renderStatus();
       } else if (msg.type === 'done') {
         if (msg.method === 'fronts') done(framesFromFronts(msg.res), msg.ms, msg.res);
-        else done(msg.res, msg.ms);
+        else done(msg.res, msg.ms, null, msg.meta);
       }
       else {
         st.error = msg.message;
@@ -455,7 +458,7 @@ async function compute() {
       }
     };
     if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet, fanStep: st.fanStep } });
-    else worker.postMessage({ id, method: 'fv', prob });
+    else worker.postMessage({ id, method: 'fv', prob, match: fvMatch() });
   } catch {
     // запасной путь — в основном потоке
     const t0 = performance.now();
@@ -464,10 +467,32 @@ async function compute() {
       const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet, fanStep: st.fanStep });
       done(framesFromFronts(fr), performance.now() - t0, fr);
     } else {
-      const { simulate } = await import('../core/fv1d.ts');
-      done(simulate(prob), performance.now() - t0);
+      const match = fvMatch();
+      if (match) {
+        const { simulateMatched } = await import('../core/fvMatched.ts');
+        const m = simulateMatched(prob, match);
+        done(m.res, performance.now() - t0, null, { tEnd: m.tEnd, length: m.length, cellsPerL: m.cellsPerL, capped: m.capped });
+      } else {
+        const { simulate } = await import('../core/fv1d.ts');
+        done(simulate(prob), performance.now() - t0);
+      }
     }
   }
+}
+
+interface FvMeta {
+  tEnd: number;
+  length: number;
+  cellsPerL: number;
+  capped: boolean;
+}
+
+/** Предел общего числа ячеек КО на длинном отрезке (время растёт как квадрат числа ячеек). */
+const FV_MAX_CELLS = 3200;
+
+/** КО в режиме «до затухания» считаются до того же момента и на той же длине, что и метод фронтов. */
+function fvMatch() {
+  return st.untilQuiet ? { fanStep: st.fanStep, frames: FRONT_FRAMES, maxCells: FV_MAX_CELLS } : null;
 }
 
 /** Сколько моментов сохраняет метод фронтов (по ним строится точный фон диаграммы x–t). */
@@ -562,7 +587,15 @@ function renderStatus() {
       `Численное решение: ${r.N} ячеек, ${r.steps} шагов, ${st.ms.toFixed(0)} мс. ` +
         `Кинематический баланс ∫(p − p0)dx + ∫v*dt = ${r.kinematicError.toExponential(1)}. ` +
         `Работа границы ${fmt(r.work, 4)}, прирост энергии среды ${fmt(r.energyGain, 4)}, рассеяно ${(diss * 100).toFixed(2)} % (ударные волны + численная вязкость; убывает с измельчением сетки).`,
-    );
+    );    const mt = st.fvMeta;
+    if (mt)
+      add(
+        mt.capped ? 'warn' : 'info',
+        `Как и метод фронтов, расчёт идёт до момента, после которого фронты больше не встречаются: t c1/L = ${fmt(mt.tEnd, 3)}, на участке до x1/L = ${fmt(mt.length, 3)}.` +
+          (mt.capped
+            ? ` Чтобы расчёт занял разумное время, сетка огрублена до ${Math.round(mt.cellsPerL)} ячеек на L (вместо ${st.N}; всего ${r.N}) — фронты размазаны сильнее, чем на коротком отрезке.`
+            : ` ${Math.round(mt.cellsPerL)} ячеек на L.`),
+      );
   }
 }
 

@@ -24,8 +24,10 @@ export interface SeriesProblem {
   material: Material;
   F0: Vec3;
   pulses: Pulse[];
-  /** Число ячеек на отрезке x̂ ∈ [0, 1]. */
+  /** Число ячеек на расчётном отрезке x̂ ∈ [0, length]. */
   N: number;
+  /** Длина расчётного отрезка (по умолчанию 1). */
+  length?: number;
   /** Конечное время t̂. */
   tEnd: number;
   /** Сколько кадров сохранить. */
@@ -82,11 +84,11 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
   const cfl = prob.cfl ?? 0.4;
   const G = 2; // фиктивные ячейки с каждой стороны
   const M = N + 2 * G;
-  const dx = 1 / N;
+  const dx = (prob.length ?? 1) / N;
   const U = Array.from({ length: 6 }, () => new Float64Array(M));
   const U1 = Array.from({ length: 6 }, () => new Float64Array(M));
   const R = Array.from({ length: 6 }, () => new Float64Array(M));
-  for (let i = 0; i < M; i++) for (let k = 0; k < 3; k++) U[k][i] = F0[k];
+  for (let i = 0; i < M; i++) for (let k = 0; k < 3; k++) U[k][i] = U1[k][i] = F0[k]; // U1 тоже: вне активной части он не обновляется
   const T = new Float64Array(6);
   const slope = Array.from({ length: 6 }, () => new Float64Array(M));
   const cf = new Float64Array(M);
@@ -96,6 +98,12 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
   const L = new Float64Array(6);
   const Rr = new Float64Array(6);
   let boundaryT1 = 0; // напряжение σ11 на границе (из потока) — для работы
+  // Активная часть отрезка: правее последней ячейки, отличной от начального состояния (с допуском
+  // 1e-30), все ячейки равны F0 и их правая часть — тождественный ноль, поэтому их можно не считать.
+  // Шаблон схемы за шаг (две стадии RK) расширяет возмущение не более чем на 4 ячейки — берём запас 8.
+  // На длинном отрезке (расчёт «до затухания») это примерно вдвое сокращает работу.
+  let Ne = N;
+  let last = -1; // последняя возмущённая ячейка
 
   const fillGhosts = (W: Float64Array[], vstar: number) => {
     for (let j = 0; j < G; j++) {
@@ -105,9 +113,11 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
       W[3][dst] = 2 * vstar - W[3][src];
       W[4][dst] = -W[4][src];
       W[5][dst] = -W[5][src];
-      const srcR = G + N - 1 - j;
-      const dstR = G + N + j;
-      for (let k = 0; k < 6; k++) W[k][dstR] = W[k][srcR];
+      if (Ne === N) {
+        const srcR = G + N - 1 - j;
+        const dstR = G + N + j;
+        for (let k = 0; k < 6; k++) W[k][dstR] = W[k][srcR];
+      }
     }
   };
 
@@ -115,18 +125,19 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
   const rhs = (W: Float64Array[], vstar: number): number => {
     fillGhosts(W, vstar);
     let amax = 0;
-    for (let i = 0; i < M; i++) {
+    const iEnd = Math.min(M, G + Ne + G);
+    for (let i = 0; i < iEnd; i++) {
       // оценка скорости быстрых возмущений: √(∂σ11/∂p) с запасом
       const h = 1e-7 * Math.max(Math.abs(W[0][i]), 1e-4);
       tractionInto(m, W[0][i] + h, W[1][i], W[2][i], T, 0);
       tractionInto(m, W[0][i] - h, W[1][i], W[2][i], T, 3);
       cf[i] = 1.1 * Math.sqrt(Math.max((T[0] - T[3]) / (2 * h), 1e-6));
-      if (i >= G && i < G + N) amax = Math.max(amax, cf[i]);
+      if (i >= G && i < G + Ne) amax = Math.max(amax, cf[i]);
     }
     for (let k = 0; k < 6; k++)
-      for (let i = 1; i < M - 1; i++) slope[k][i] = minmod(W[k][i] - W[k][i - 1], W[k][i + 1] - W[k][i]);
+      for (let i = 1; i < iEnd - 1; i++) slope[k][i] = minmod(W[k][i] - W[k][i - 1], W[k][i + 1] - W[k][i]);
     // интерфейсы i+1/2 между ячейками i и i+1, i = G−1 … G+N−1
-    for (let i = G - 1; i < G + N; i++) {
+    for (let i = G - 1; i < G + Ne; i++) {
       for (let k = 0; k < 6; k++) {
         L[k] = W[k][i] + 0.5 * slope[k][i];
         Rr[k] = W[k][i + 1] - 0.5 * slope[k][i + 1];
@@ -140,7 +151,7 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
       }
       if (i === G - 1) boundaryT1 = -flux[3][i];
     }
-    for (let k = 0; k < 6; k++) for (let i = G; i < G + N; i++) R[k][i] = -(flux[k][i] - flux[k][i - 1]) / dx;
+    for (let k = 0; k < 6; k++) for (let i = G; i < G + Ne; i++) R[k][i] = -(flux[k][i] - flux[k][i - 1]) / dx;
     return amax;
   };
 
@@ -168,6 +179,14 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
   nextFrame = 1;
   while (t < tEnd - 1e-12) {
     const v0 = boundaryVelocity(prob.pulses, t + 1e-12);
+    for (let i = Math.min(N - 1, last + 8); i > last; i--) {
+      const j = G + i;
+      if (Math.abs(U[0][j] - F0[0]) > 1e-30 || Math.abs(U[1][j] - F0[1]) > 1e-30 || Math.abs(U[2][j] - F0[2]) > 1e-30 || Math.abs(U[3][j]) > 1e-30 || Math.abs(U[4][j]) > 1e-30 || Math.abs(U[5][j]) > 1e-30) {
+        last = i;
+        break;
+      }
+    }
+    Ne = Math.min(N, last + 1 + 8);
     const amax = rhs(U, v0);
     let dt = (cfl * dx) / amax;
     const tFrame = (nextFrame * tEnd) / (nF - 1);
@@ -175,10 +194,10 @@ export function simulate(prob: SeriesProblem, onProgress?: (fraction: number) =>
     for (const b of [...breakTimes, tFrame, tEnd]) if (b > t + 1e-12 && t + dt > b) dt = b - t;
     // SSP-RK2 (граничная скорость постоянна на шаге)
     const tb1 = boundaryT1;
-    for (let k = 0; k < 6; k++) for (let i = G; i < G + N; i++) U1[k][i] = U[k][i] + dt * R[k][i];
+    for (let k = 0; k < 6; k++) for (let i = G; i < G + Ne; i++) U1[k][i] = U[k][i] + dt * R[k][i];
     rhs(U1, v0);
     const tb2 = boundaryT1;
-    for (let k = 0; k < 6; k++) for (let i = G; i < G + N; i++) U[k][i] = 0.5 * (U[k][i] + U1[k][i] + dt * R[k][i]);
+    for (let k = 0; k < 6; k++) for (let i = G; i < G + Ne; i++) U[k][i] = 0.5 * (U[k][i] + U1[k][i] + dt * R[k][i]);
     work += dt * v0 * -0.5 * (tb1 + tb2); // мощность: −σ11(0)·v*
     kinInt += dt * v0;
     ub += dt * v0;

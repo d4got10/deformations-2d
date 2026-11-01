@@ -132,6 +132,20 @@ try {
     await page.waitForTimeout(300);
     if (await page.evaluate(() => window.__series.computing !== 0 || window.__series.fronts.warnings.length)) fail('мелкий шаг веера: расчёт не завершился или с предупреждениями');
     await page.selectOption('#s-fan-step', '0.00025');
+    // конечные объёмы считаются до того же момента и на той же длине, что и метод фронтов
+    {
+      await page.waitForTimeout(300);
+      await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts && window.__series.fanStep === 2.5e-4, null, { timeout: 120000 });
+      const ref = await page.evaluate(() => ({ tEnd: window.__series.tEnd, xView: window.__series.xView }));
+      await page.selectOption('#s-method', 'fv');
+      await page.waitForFunction(() => window.__series.computing === 0 && window.__series.res && !window.__series.fronts && window.__series.fvMeta, null, { timeout: 180000 });
+      const fv = await page.evaluate(() => ({ tEnd: window.__series.tEnd, xView: window.__series.xView, kin: window.__series.res.kinematicError }));
+      if (Math.abs(fv.tEnd - ref.tEnd) > 1e-6 * ref.tEnd || Math.abs(fv.xView - ref.xView) > 1e-6 * ref.xView) fail(`КО: время/длина не совпали с методом фронтов: ${JSON.stringify({ fv, ref })}`);
+      if (Math.abs(fv.kin) > 1e-12) fail(`КО на длинном отрезке: нарушен кинематический баланс ${fv.kin}`);
+      await page.locator('#s-xt').screenshot({ path: `${outDir}/series-fv-long-${scheme}.png` });
+      await page.selectOption('#s-method', 'fronts');
+      await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts, null, { timeout: 120000 });
+    }
     await page.selectOption('#s-material', { index: 0 });
     // один удар: численное решение совпадает с точным (пунктир)
     await page.selectOption('#s-pulse-preset', 'Один удар (проверка по §2.3)');
@@ -150,6 +164,7 @@ try {
     if (nser !== 2) fail(`нет точного решения на профилях: серий ${nser}`);
     // масштаб профилей колесом
     {
+      await page.locator('#s-profiles canvas').first().scrollIntoViewIfNeeded();
       const pb = await page.locator('#s-profiles canvas').first().boundingBox();
       await page.mouse.move(pb.x + pb.width * 0.3, pb.y + pb.height * 0.5);
       await page.mouse.wheel(0, -500);
