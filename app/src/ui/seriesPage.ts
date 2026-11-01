@@ -575,7 +575,7 @@ function storedFrameAt(t: number) {
  * волны, а фронты, «прошедшие сквозь» друг друга, поставили бы состояния не на свои места —
  * при большом увеличении смещений это выглядит как прыжок сетки. Поэтому сначала пробуем шаг
  * вперёд от предыдущего момента, затем назад от следующего, а если встреча есть в обе стороны —
- * сдвигаем вперёд только до момента встречи (задержка — не больше интервала между моментами).
+ * встретившиеся фронты стоят в точке встречи до следующего момента, остальные движутся точно.
  */
 function frontsAt(t: number): { f: FrontsFrame; xs: number[] } {
   const fr = st.fronts!;
@@ -594,13 +594,33 @@ function frontsAt(t: number): { f: FrontsFrame; xs: number[] } {
     const back = move(g, t - g.t);
     if (valid(back)) return { f: g, xs: back };
   }
-  // первая встреча соседних фронтов (или фронта с границей) после f.t
-  let tc = t - f.t;
-  for (let i = 0; i < f.xs.length; i++) {
-    if (f.speeds[i] < 0) tc = Math.min(tc, f.xs[i] / -f.speeds[i]);
-    if (i > 0 && f.speeds[i - 1] > f.speeds[i]) tc = Math.min(tc, (f.xs[i] - f.xs[i - 1]) / (f.speeds[i - 1] - f.speeds[i]));
+  // Встреча есть в обе стороны: сдвигаем вперёд и исправляем порядок только у встретившихся фронтов
+  // (они стоят в точке встречи, пока не наступит следующий сохранённый момент). Остальные фронты
+  // остаются точными — иначе останавливалась бы вся картина и фон диаграммы шёл бы «лесенкой».
+  return { f, xs: monotone(fwd) };
+}
+
+/** Ближайшая неубывающая последовательность (объединение соседних нарушителей), x ≥ 0. */
+function monotone(xs: number[]): number[] {
+  const val: number[] = [];
+  const cnt: number[] = [];
+  for (const x0 of xs) {
+    let v = Math.max(0, x0);
+    let c = 1;
+    while (val.length && val[val.length - 1] > v) {
+      const pv = val.pop()!;
+      const pc = cnt.pop()!;
+      v = (pv * pc + v * c) / (pc + c);
+      c += pc;
+    }
+    val.push(v);
+    cnt.push(c);
   }
-  return { f, xs: move(f, Math.max(0, tc)) };
+  const out: number[] = [];
+  val.forEach((v, i) => {
+    for (let k = 0; k < cnt[i]; k++) out.push(v);
+  });
+  return out;
 }
 
 let exactFrame: { t: number; id: number; f: SeriesFrame; du1: Float64Array; du3: Float64Array } | null = null;
