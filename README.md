@@ -16,6 +16,15 @@ npm run dev
 
 Откройте адрес, который напечатает Vite (обычно http://localhost:5173).
 
+## Публикация
+
+Сайт: https://d4got10.github.io/deformations-2d/ (ветка `gh-pages`).
+Обновить после изменений:
+
+```bash
+bash app/scripts/deploy.sh
+```
+
 ## Проверка
 
 ```bash
