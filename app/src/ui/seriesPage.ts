@@ -1050,11 +1050,27 @@ let exactCache: { key: string; img: HTMLCanvasElement } | null = null;
  * со своими скоростями до t. Растр строится под текущее окно с разрешением экрана
  * (время — по горизонтали, x — по вертикали).
  */
+/** Перестройка фона t–x: когда окно последний раз менялось и сколько заняла последняя чёткая перестройка. */
+const xtPerf = { winKey: '', changed: 0, fullMs: 0, timer: 0 };
+
 function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t: number; b: number }, w: number, h: number, win: { x0: number; x1: number; t0: number; t1: number }) {
-  const pw = Math.max(1, Math.round(w - m.l - m.r));
-  const ph = Math.max(1, Math.round(h - m.t - m.b));
-  const key = [win.x0, win.x1, win.t0, win.t1, pw, ph, st.field, reqId, css('--panel'), fieldMax].join('|');
+  const PW = Math.max(1, Math.round(w - m.l - m.r));
+  const PH = Math.max(1, Math.round(h - m.t - m.b));
+  // Пока окно меняется (колесо, перетаскивание), фон строится в пониженном разрешении, если чёткий
+  // строится заметно долго; через ~0.25 с после остановки — перестраивается чётко.
+  const now = performance.now();
+  const winKey = [win.x0, win.x1, win.t0, win.t1].join('|');
+  if (winKey !== xtPerf.winKey) {
+    xtPerf.winKey = winKey;
+    xtPerf.changed = now;
+  }
+  const interacting = now - xtPerf.changed < 250 && xtPerf.fullMs > 30;
+  const sc = interacting ? Math.min(4, Math.max(2, Math.ceil(Math.sqrt(xtPerf.fullMs / 25)))) : 1;
+  const pw = Math.ceil(PW / sc);
+  const ph = Math.ceil(PH / sc);
+  const key = [winKey, pw, ph, st.field, reqId, css('--panel'), fieldMax].join('|');
   if (!exactCache || exactCache.key !== key) {
+    const tStart = performance.now();
     const img = document.createElement('canvas');
     img.width = pw;
     img.height = ph;
@@ -1062,13 +1078,37 @@ function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t
     const data = ic.createImageData(pw, ph);
     const base = parseColor(css('--panel'));
     const hv = new Float64Array(4);
+    const a = new Float64Array(4);
+    const b = new Float64Array(4);
+    const scale = st.hyb ? hybInfo().scale : null;
+    /** Значение кадра в точке x проходом по узлам (x растёт от строки к строке); возвращает новый указатель. */
+    const walk = (f: HybridFrame, x: number, j: number, out: Float64Array) => {
+      const xs = f.xs;
+      const W = f.W;
+      const n = xs.length;
+      while (j < n - 1 && xs[j] < x) j++;
+      const xa = xs[j - 1];
+      const xb = xs[j];
+      const u = x <= xa ? 0 : x >= xb ? 1 : xb > xa ? (x - xa) / (xb - xa) : 1;
+      const o = 4 * (j - 1);
+      for (let k = 0; k < 4; k++) out[k] = W[o + k] + u * (W[o + 4 + k] - W[o + k]);
+      return j;
+    };
     for (let col = 0; col < pw && st.hyb; col++) {
-      // гибрид: между сохранёнными моментами — перенос вдоль характеристик (без ступенек по времени)
+      // гибрид: между сохранёнными моментами — перенос вдоль характеристик (без ступенек по времени);
+      // там, где ничего не движется (соседние кадры совпадают), — быстрый проход по узлам
       const t = win.t0 + ((col + 0.5) / pw) * (win.t1 - win.t0);
       const I = hybInterp(t);
+      let j0 = 1;
+      let j1 = 1;
       for (let row = ph - 1; row >= 0; row--) {
         const x = win.x0 + ((ph - 1 - row + 0.5) / ph) * (win.x1 - win.x0);
-        I.at(x, hv);
+        j0 = walk(I.f0, x, j0, a);
+        j1 = walk(I.f1, x, j1, b);
+        let mis = 0;
+        for (let k = 0; k < 4; k++) mis += Math.abs(a[k] - b[k]) / scale![k];
+        if (mis < 1e-3) for (let k = 0; k < 4; k++) hv[k] = a[k] + I.w * (b[k] - a[k]);
+        else I.at(x, hv);
         const F: Vec3 = [st.F0[0] + hv[0], 0, st.F0[2] + hv[1]];
         const [R, G, B] = diverging(fieldOf(F, [hv[2], 0, hv[3]]) / fieldMax, base);
         const q = 4 * (row * pw + col);
@@ -1097,8 +1137,15 @@ function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t
     }
     ic.putImageData(data, 0, 0);
     exactCache = { key, img };
+    const ms = performance.now() - tStart;
+    if (sc === 1) xtPerf.fullMs = ms;
+    (window as unknown as { __xtMs: number }).__xtMs = ms;
   }
-  ctx.imageSmoothingEnabled = false;
+  if (sc > 1) {
+    clearTimeout(xtPerf.timer);
+    xtPerf.timer = window.setTimeout(() => drawXt(), 270);
+  }
+  ctx.imageSmoothingEnabled = sc > 1;
   ctx.drawImage(exactCache.img, m.l, m.t, w - m.l - m.r, h - m.t - m.b);
 }
 
