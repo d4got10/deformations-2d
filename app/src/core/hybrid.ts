@@ -127,17 +127,18 @@ const toState = (w: V4): State => ({ F: [w[0], w[1]], v: [w[2], w[3]] });
 const fromState = (s: State): V4 => [s.F[0], s.F[1], s.v[0], s.v[1]];
 const minmod = (a: number, b: number) => (a * b <= 0 ? 0 : Math.abs(a) < Math.abs(b) ? a : b);
 
-export function solveHybrid(prob: HybridProblem): HybridResult {
-  if (!prob.untilQuiet) return run(prob, prob.length ?? 1, prob.tEnd);
+export function solveHybrid(prob: HybridProblem, onProgress?: (fraction: number) => void): HybridResult {
+  if (!prob.untilQuiet) return run(prob, prob.length ?? 1, prob.tEnd, onProgress);
   // те же отрезок и время, что у метода фронтов «до затухания» (грубый шаг веера — нужны лишь размеры)
   const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: 2, untilQuiet: true, maxTime: prob.maxTime, fanStep: Math.max(prob.fanStep ?? 0, 1e-3) });
-  const res = run(prob, fr.xView, fr.tEnd);
+  onProgress?.(0.05);
+  const res = run(prob, fr.xView, fr.tEnd, (f) => onProgress?.(0.05 + 0.95 * f));
   res.tQuiet = fr.tQuiet;
   res.horizonReached = fr.horizonReached;
   return res;
 }
 
-function run(prob: HybridProblem, L: number, tEnd: number): HybridResult {
+function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fraction: number) => void): HybridResult {
   const mat = prob.material;
   const c = { m: mat };
   const N = Math.max(8, Math.min(Math.round((prob.cellsPerL ?? 400) * L), prob.maxCells ?? Infinity));
@@ -996,6 +997,7 @@ function run(prob: HybridProblem, L: number, tEnd: number): HybridResult {
     if (t >= tFrame - 1e-12 && nextFrame < nF) {
       snapshot();
       nextFrame++;
+      if (nextFrame % 10 === 0) onProgress?.(t / tEnd);
     }
   }
   if (steps >= maxSteps) warnings.push(`Достигнут предел числа шагов (${maxSteps}).`);

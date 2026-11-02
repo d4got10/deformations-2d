@@ -418,8 +418,35 @@ let timer = 0;
 
 function schedule() {
   clearTimeout(timer);
+  if (!st.computing) busySince = performance.now();
   st.computing = 0.001; // расчёт запланирован
+  updateBusy();
   timer = window.setTimeout(compute, 250);
+}
+
+/**
+ * Индикация пересчёта: закреплённая плашка над графиками (метод, процент, если решатель его
+ * сообщает, и сколько секунд идёт расчёт), а прежние графики приглушаются — видно, что они устарели.
+ */
+let busySince = 0;
+let busyTimer = 0;
+const METHOD_NAMES = { fronts: 'метод фронтов', hybrid: 'гибрид (ударные волны + сетка)', fv: 'конечные объёмы' } as const;
+function updateBusy() {
+  const box = document.getElementById('s-busy');
+  const sec = document.querySelector('#page-series section');
+  if (!box || !sec) return;
+  const on = st.computing > 0;
+  box.hidden = !on;
+  sec.classList.toggle('busy', on && !!st.res);
+  if (!on) {
+    clearInterval(busyTimer);
+    busyTimer = 0;
+    return;
+  }
+  const el = ((performance.now() - busySince) / 1000).toFixed(1);
+  const pct = st.computing > 0.002 ? ` ${Math.round(st.computing * 100)} %` : '';
+  $('s-busy-text').textContent = `Пересчёт: ${METHOD_NAMES[st.method]}…${pct} · ${el} с`;
+  if (!busyTimer) busyTimer = window.setInterval(updateBusy, 200);
 }
 
 function problem(): SeriesProblem {
@@ -434,6 +461,7 @@ async function compute() {
     return;
   }
   const id = ++reqId;
+  if (!st.computing) busySince = performance.now();
   st.computing = 0.001;
   renderStatus();
   const prob = problem();
@@ -537,12 +565,108 @@ function hybFrameAt(t: number): HybridFrame {
   return fr[k];
 }
 
-/** Состояние гибрида (кусочно-линейное) как функция x; узлы обходятся по возрастанию x. */
-function hybSampler(f: HybridFrame) {
-  const F0 = st.F0;
+/** Значения (p − p0, s − s0, v1, v3) кусочно-линейного профиля кадра в точке x → out. */
+function sampleW(f: HybridFrame, x: number, out: Float64Array, o: number) {
+  const xs = f.xs;
+  const W = f.W;
+  const n = xs.length;
+  let lo = 1;
+  let hi = n - 1;
+  if (x <= xs[0]) {
+    for (let k = 0; k < 4; k++) out[o + k] = W[k];
+    return;
+  }
+  if (x >= xs[n - 1]) {
+    for (let k = 0; k < 4; k++) out[o + k] = W[4 * (n - 1) + k];
+    return;
+  }
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  const xa = xs[lo - 1];
+  const xb = xs[lo];
+  const u = xb > xa ? (x - xa) / (xb - xa) : 1;
+  const a = 4 * (lo - 1);
+  for (let k = 0; k < 4; k++) out[o + k] = W[a + k] + u * (W[a + 4 + k] - W[a + k]);
+}
+
+/** Скорости переноса для интерполяции по времени: покой и характеристики ±c_f, ±c_s в исходном состоянии. */
+let hybInterpInfo: { id: number; speeds: number[]; scale: number[] } | null = null;
+function hybInfo() {
+  if (hybInterpInfo?.id === reqId) return hybInterpInfo;
+  const m = normalize(st.material);
+  const [p, , s] = st.F0;
+  const T = (pp: number, ss: number) => {
+    const t = traction(m, [pp, 0, ss]);
+    return [t[0], t[2]];
+  };
+  const h = 1e-7 * Math.max(Math.abs(p), 1e-4);
+  const a = (T(p + h, s)[0] - T(p - h, s)[0]) / (2 * h);
+  const b = (T(p, s + h)[0] - T(p, s - h)[0]) / (2 * h);
+  const d = (T(p, s + h)[1] - T(p, s - h)[1]) / (2 * h);
+  const tr = (a + d) / 2;
+  const disc = Math.sqrt(((a - d) / 2) ** 2 + b * b);
+  const cf = Math.sqrt(Math.max(tr + disc, 0));
+  const cs = Math.sqrt(Math.max(tr - disc, 0));
+  const scale = [1e-30, 1e-30, 1e-30, 1e-30];
+  for (const f of st.hyb!.frames) for (let i = 0; i < f.W.length; i++) scale[i & 3] = Math.max(scale[i & 3], Math.abs(f.W[i]));
+  hybInterpInfo = { id: reqId, speeds: [0, cf, -cf, cs, -cs], scale };
+  return hybInterpInfo;
+}
+
+const iwA = new Float64Array(4);
+const iwB = new Float64Array(4);
+/**
+ * Решение гибрида в момент t между сохранёнными моментами t0 < t < t1. Простое смешивание кадров
+ * давало бы двойное изображение, а ближайший кадр — ступеньки на диаграмме t–x. Волны переносятся
+ * со скоростями характеристик, поэтому значение в точке x берётся из кадра t0 в точке x − c(t − t0)
+ * и из кадра t1 в точке x + c(t1 − t), где c — та из скоростей {0, ±c_f, ±c_s}, при которой эти
+ * два значения ближе всего (волна, проходящая через точку), и смешивается линейно по времени.
+ */
+function hybInterp(t: number) {
+  const fr = st.hyb!.frames;
+  const n = fr.length;
+  const pos = Math.max(0, Math.min(n - 1, (t / st.hyb!.tEnd) * (n - 1)));
+  const k = Math.min(n - 2, Math.floor(pos));
+  const f0 = fr[k];
+  const f1 = fr[k + 1];
+  const tt = Math.max(f0.t, Math.min(f1.t, t));
+  const w = f1.t > f0.t ? (tt - f0.t) / (f1.t - f0.t) : 0;
+  const tau0 = tt - f0.t;
+  const tau1 = f1.t - tt;
+  const { speeds, scale } = hybInfo();
+  return {
+    f0,
+    f1,
+    w,
+    at(x: number, out: Float64Array) {
+      if (w < 1e-9 || w > 1 - 1e-9) return sampleW(w < 0.5 ? f0 : f1, x, out, 0);
+      let best = Infinity;
+      for (const c of speeds) {
+        sampleW(f0, x - c * tau0, iwA, 0);
+        sampleW(f1, x + c * tau1, iwB, 0);
+        let mis = 0;
+        for (let q = 0; q < 4; q++) mis += Math.abs(iwA[q] - iwB[q]) / scale[q];
+        if (mis < best - 1e-12) {
+          best = mis;
+          for (let q = 0; q < 4; q++) out[q] = iwA[q] + w * (iwB[q] - iwA[q]);
+        }
+        // точка, где ничего не движется (или почти): дальше не ищем
+        if (mis < 1e-3) break;
+      }
+    },
+  };
+}
+
+/** Состояние гибрида в момент t как функция x. */
+function hybSampler(t: number) {
+  const I = hybInterp(t);
+  const out = new Float64Array(4);
   return (x: number) => {
-    const q = hybridStateAt(f, F0, x);
-    return { F: [q.F[0], 0, q.F[1]] as Vec3, v: [q.v[0], 0, q.v[1]] as Vec3 };
+    I.at(x, out);
+    return { F: [st.F0[0] + out[0], 0, st.F0[2] + out[1]] as Vec3, v: [out[2], 0, out[3]] as Vec3 };
   };
 }
 
@@ -684,6 +808,7 @@ function renderStatus() {
   };
   if (st.error) add('err', st.error);
   if (st.computing) add('info', `Расчёт… ${Math.round(st.computing * 100)}%`);
+  updateBusy();
   const r = st.res;
   const fr = st.fronts;
   const hy = st.hyb;
@@ -869,11 +994,26 @@ function frameAt(t: number): SeriesFrame {
   if (st.hyb) {
     if (exactFrame && exactFrame.t === t && exactFrame.id === reqId) return exactFrame.f;
     const r = st.res!;
-    const f = hybFrameAt(t);
+    const I = hybInterp(t);
     const U = exactFrame?.f.U.length === 6 * r.N ? exactFrame.f.U : new Float32Array(6 * r.N);
-    fillHybrid(f, U, r.N, r.dx);
-    const { du1, du3 } = hybridDisplacements(f, r.N, r.dx);
-    exactFrame = { t, id: reqId, f: { t: f.t, U, ub: f.ub }, du1, du3 };
+    const N = r.N;
+    const out = new Float64Array(4);
+    for (let i = 0; i < N; i++) {
+      I.at((i + 0.5) * r.dx, out);
+      U[i] = st.F0[0] + out[0];
+      U[N + i] = 0;
+      U[2 * N + i] = st.F0[2] + out[1];
+      U[3 * N + i] = out[2];
+      U[4 * N + i] = 0;
+      U[5 * N + i] = out[3];
+    }
+    // перемещения непрерывны и меняются плавно — линейно между точными перемещениями соседних кадров
+    const A = hybridDisplacements(I.f0, N, r.dx);
+    const B = hybridDisplacements(I.f1, N, r.dx);
+    const du1 = A.du1.map((v, i) => v + I.w * (B.du1[i] - v));
+    const du3 = A.du3.map((v, i) => v + I.w * (B.du3[i] - v));
+    const ub = I.f0.ub + I.w * (I.f1.ub - I.f0.ub);
+    exactFrame = { t, id: reqId, f: { t, U, ub }, du1, du3 };
     return exactFrame.f;
   }
   if (!fr) return storedFrameAt(t);
@@ -921,22 +1061,16 @@ function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t
     const ic = img.getContext('2d')!;
     const data = ic.createImageData(pw, ph);
     const base = parseColor(css('--panel'));
+    const hv = new Float64Array(4);
     for (let col = 0; col < pw && st.hyb; col++) {
-      // гибрид: кусочно-линейный профиль ближайшего сохранённого момента
+      // гибрид: между сохранёнными моментами — перенос вдоль характеристик (без ступенек по времени)
       const t = win.t0 + ((col + 0.5) / pw) * (win.t1 - win.t0);
-      const f = hybFrameAt(t);
-      const xs = f.xs;
-      const W = f.W;
-      const n = xs.length;
-      let j = 1;
+      const I = hybInterp(t);
       for (let row = ph - 1; row >= 0; row--) {
         const x = win.x0 + ((ph - 1 - row + 0.5) / ph) * (win.x1 - win.x0);
-        while (j < n - 1 && xs[j] < x) j++;
-        const u = xs[j] > xs[j - 1] ? Math.max(0, Math.min(1, (x - xs[j - 1]) / (xs[j] - xs[j - 1]))) : 1;
-        const o = 4 * (j - 1);
-        const val = (k: number) => W[o + k] + u * (W[o + 4 + k] - W[o + k]);
-        const F: Vec3 = [st.F0[0] + val(0), 0, st.F0[2] + val(1)];
-        const [R, G, B] = diverging(fieldOf(F, [val(2), 0, val(3)]) / fieldMax, base);
+        I.at(x, hv);
+        const F: Vec3 = [st.F0[0] + hv[0], 0, st.F0[2] + hv[1]];
+        const [R, G, B] = diverging(fieldOf(F, [hv[2], 0, hv[3]]) / fieldMax, base);
         const q = 4 * (row * pw + col);
         data.data[q] = R;
         data.data[q + 1] = G;
@@ -1116,7 +1250,7 @@ function setupXtZoom() {
 
 /** Состояние среды в точке (x, t): точное для метода фронтов, из ближайшего кадра для КО. */
 function stateAtXt(x: number, t: number): { F: Vec3; v: Vec3 } {
-  if (st.hyb) return hybSampler(hybFrameAt(t))(x);
+  if (st.hyb) return hybSampler(t)(x);
   if (st.fronts) {
     const { f, xs } = frontsAt(t);
     let j = 0;
@@ -1746,7 +1880,7 @@ function renderProfiles() {
   let smooth: ((x: number) => { F: Vec3; v: Vec3 }) | null = null;
   if (st.hyb) {
     const f = hybFrameAt(t);
-    smooth = hybSampler(f);
+    smooth = hybSampler(t);
     // для автомасштаба — значения в узлах (между узлами профиль линейный)
     edges = Array.from({ length: f.xs.length - 1 }, (_, i) => 0.5 * (f.xs[i] + f.xs[i + 1]));
     states = Array.from({ length: f.xs.length }, (_, i) => ({ F: [st.F0[0] + f.W[4 * i], 0, st.F0[2] + f.W[4 * i + 1]] as Vec3, v: [f.W[4 * i + 2], 0, f.W[4 * i + 3]] as Vec3 }));

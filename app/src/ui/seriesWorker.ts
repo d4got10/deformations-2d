@@ -17,7 +17,7 @@ self.onmessage = (e: MessageEvent<Msg>) => {
       const res = trackFronts(e.data.prob);
       self.postMessage({ id, type: 'done', method: 'fronts', res, ms: performance.now() - t0 });
     } else if (e.data.method === 'hybrid') {
-      const res = solveHybrid(e.data.prob);
+      const res = solveHybrid(e.data.prob, (f) => self.postMessage({ id, type: 'progress', f }));
       self.postMessage({ id, type: 'done', method: 'hybrid', res, ms: performance.now() - t0 }, { transfer: res.frames.flatMap((f) => [f.xs.buffer, f.W.buffer]) });
     } else {
       const progress = (f: number) => self.postMessage({ id, type: 'progress', f });
