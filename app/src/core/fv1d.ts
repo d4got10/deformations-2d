@@ -62,7 +62,7 @@ export function boundaryVelocity(pulses: Pulse[], t: number): number {
 }
 
 /** Напряжения T = (σ11, σ21, σ31) без выделения памяти (модель (1.9)). */
-function tractionInto(m: Material, p: number, g: number, s: number, out: Float64Array, o: number) {
+export function tractionInto(m: Material, p: number, g: number, s: number, out: Float64Array, o: number) {
   const q = g * g + s * s;
   const J2 = Math.max(p * p + q / 2, 1e-30);
   const r = Math.sqrt(J2);

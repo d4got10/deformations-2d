@@ -5,6 +5,7 @@
  */
 import { type FrontsFrame, type FrontsResult, type Segment, stateAt } from '../core/fronts.ts';
 import { type Pulse, type SeriesFrame, type SeriesProblem, type SeriesResult, boundaryVelocity, cell } from '../core/fv1d.ts';
+import { type HybridFrame, type HybridResult, hybridStateAt } from '../core/hybrid.ts';
 import { profileAt, solveImpact } from '../core/impact.ts';
 import { type Material, normalize } from '../core/material.ts';
 import { type Vec3, traction } from '../core/material1d.ts';
@@ -95,8 +96,14 @@ const st = {
   speed: 0.12,
   t: 0.6,
   res: null as SeriesResult | null,
-  /** 'fronts' — метод волновых фронтов (как в диссертации), 'fv' — конечные объёмы (для сравнения). */
-  method: 'fronts' as 'fronts' | 'fv',
+  /**
+   * 'fronts' — метод волновых фронтов (как в диссертации), 'hybrid' — ударные волны выделяются точно,
+   * вееры считаются на сетке (гладкие), 'fv' — конечные объёмы (для сравнения).
+   */
+  method: 'fronts' as 'fronts' | 'hybrid' | 'fv',
+  /** Гибрид: ячеек на L. */
+  hybCells: 400,
+  hyb: null as HybridResult | null,
   showFronts: true,
   /** Рисовать и слабые фронты (отражения при встречах), с яркостью по логарифму скачка. */
   weakFronts: false,
@@ -222,6 +229,7 @@ function buildControls() {
   const fsN = fieldset(c, 'Расчёт и отображение');
   const msel = document.createElement('select');
   msel.add(new Option('волновые фронты (как в диссертации)', 'fronts'));
+  msel.add(new Option('ударные волны + сетка (гладкие вееры)', 'hybrid'));
   msel.add(new Option('конечные объёмы (для сравнения)', 'fv'));
   msel.value = st.method;
   msel.addEventListener('change', () => {
@@ -300,6 +308,15 @@ function buildControls() {
     schedule();
   });
   row(fsN, 'Сетка (КО)', nsel, 's-grid');
+  const hsel = document.createElement('select');
+  for (const n of [200, 400, 800]) hsel.add(new Option(`${n} ячеек на L${n === 400 ? ' (по умолчанию)' : n === 800 ? ' (в 4 раза дольше)' : ''}`, String(n)));
+  hsel.value = String(st.hybCells);
+  hsel.title = 'Гибридный метод: сетка, на которой считаются вееры между выделенными ударными волнами';
+  hsel.addEventListener('change', () => {
+    st.hybCells = +hsel.value;
+    schedule();
+  });
+  row(fsN, 'Сетка (гибрид)', hsel, 's-hyb-grid');
   const fsel = document.createElement('select');
   for (const [k, v] of Object.entries(FIELD_LABELS)) fsel.add(new Option(v, k));
   fsel.addEventListener('change', () => {
@@ -420,13 +437,14 @@ async function compute() {
   st.computing = 0.001;
   renderStatus();
   const prob = problem();
-  const done = (res: SeriesResult, ms: number, fronts: FrontsResult | null = null, meta: FvMeta | null = null) => {
+  const done = (res: SeriesResult, ms: number, fronts: FrontsResult | null = null, meta: FvMeta | null = null, hyb: HybridResult | null = null) => {
     if (id !== reqId) return;
     st.res = res;
     st.fronts = fronts;
+    st.hyb = hyb;
     st.fvMeta = meta;
-    st.tEnd = fronts ? fronts.tEnd : meta ? meta.tEnd : st.tBase;
-    st.xView = fronts ? fronts.xView : meta ? meta.length : 1;
+    st.tEnd = fronts ? fronts.tEnd : hyb ? hyb.tEnd : meta ? meta.tEnd : st.tBase;
+    st.xView = fronts ? fronts.xView : hyb ? hyb.xView : meta ? meta.length : 1;
     st.xtWin = null;
     profShared.win = null;
     st.xtPick = null;
@@ -449,6 +467,7 @@ async function compute() {
         renderStatus();
       } else if (msg.type === 'done') {
         if (msg.method === 'fronts') done(framesFromFronts(msg.res), msg.ms, msg.res);
+        else if (msg.method === 'hybrid') done(framesFromHybrid(msg.res), msg.ms, null, null, msg.res);
         else done(msg.res, msg.ms, null, msg.meta);
       }
       else {
@@ -458,6 +477,7 @@ async function compute() {
       }
     };
     if (st.method === 'fronts') worker.postMessage({ id, method: 'fronts', prob: { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet, fanStep: st.fanStep } });
+    else if (st.method === 'hybrid') worker.postMessage({ id, method: 'hybrid', prob: hybridProblem(prob) });
     else worker.postMessage({ id, method: 'fv', prob, match: fvMatch() });
   } catch {
     // запасной путь — в основном потоке
@@ -466,6 +486,10 @@ async function compute() {
       const { trackFronts } = await import('../core/fronts.ts');
       const fr = trackFronts({ material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: FRONT_FRAMES, untilQuiet: st.untilQuiet, fanStep: st.fanStep });
       done(framesFromFronts(fr), performance.now() - t0, fr);
+    } else if (st.method === 'hybrid') {
+      const { solveHybrid } = await import('../core/hybrid.ts');
+      const hr = solveHybrid(hybridProblem(prob));
+      done(framesFromHybrid(hr), performance.now() - t0, null, null, hr);
     } else {
       const match = fvMatch();
       if (match) {
@@ -497,6 +521,112 @@ function fvMatch() {
 
 /** Сколько моментов сохраняет метод фронтов (по ним строится точный фон диаграммы x–t). */
 const FRONT_FRAMES = 1201;
+/** Гибрид хранит кусочно-линейные профили (~ число ячеек узлов на кадр) — моментов меньше. */
+const HYB_FRAMES = 601;
+/** Предел общего числа ячеек гибрида на длинном отрезке (расчёт «до затухания»). */
+const HYB_MAX_CELLS = 2400;
+
+function hybridProblem(prob: SeriesProblem) {
+  return { material: prob.material, F0: prob.F0, pulses: prob.pulses, tEnd: prob.tEnd, frames: HYB_FRAMES, cellsPerL: st.hybCells, maxCells: HYB_MAX_CELLS, untilQuiet: st.untilQuiet, fanStep: st.fanStep };
+}
+
+/** Кадр гибрида, ближайший к моменту t. */
+function hybFrameAt(t: number): HybridFrame {
+  const fr = st.hyb!.frames;
+  const k = Math.max(0, Math.min(fr.length - 1, Math.round((t / st.hyb!.tEnd) * (fr.length - 1))));
+  return fr[k];
+}
+
+/** Состояние гибрида (кусочно-линейное) как функция x; узлы обходятся по возрастанию x. */
+function hybSampler(f: HybridFrame) {
+  const F0 = st.F0;
+  return (x: number) => {
+    const q = hybridStateAt(f, F0, x);
+    return { F: [q.F[0], 0, q.F[1]] as Vec3, v: [q.v[0], 0, q.v[1]] as Vec3 };
+  };
+}
+
+/** Профили гибрида в кадры на равномерной сетке (для общих графиков: автомасштаб, граница и т. п.). */
+function framesFromHybrid(hr: HybridResult): SeriesResult {
+  const N = 1000;
+  const dx = hr.xView / N;
+  const frames = hr.frames
+    .filter((_, k) => k % 3 === 0 || k === hr.frames.length - 1)
+    .map((f) => {
+      const U = new Float32Array(6 * N);
+      fillHybrid(f, U, N, dx);
+      return { t: f.t, U, ub: f.ub };
+    });
+  return { N, dx, frames, kinematicError: hr.kinematicError, work: hr.work, energyGain: hr.energyGain, steps: hr.steps };
+}
+
+/** Значения кусочно-линейного профиля в центрах ячеек (один проход по узлам). */
+function fillHybrid(f: HybridFrame, U: Float32Array, N: number, dx: number) {
+  const xs = f.xs;
+  const W = f.W;
+  const n = xs.length;
+  let j = 1;
+  for (let i = 0; i < N; i++) {
+    const x = (i + 0.5) * dx;
+    while (j < n - 1 && xs[j] < x) j++;
+    const xa = xs[j - 1];
+    const xb = xs[j];
+    const u = xb > xa ? Math.max(0, Math.min(1, (x - xa) / (xb - xa))) : 1;
+    const o = 4 * (j - 1);
+    const val = (k: number) => W[o + k] + u * (W[o + 4 + k] - W[o + k]);
+    U[i] = st.F0[0] + val(0);
+    U[N + i] = 0;
+    U[2 * N + i] = st.F0[2] + val(1);
+    U[3 * N + i] = val(2);
+    U[4 * N + i] = 0;
+    U[5 * N + i] = val(3);
+  }
+}
+
+/** Точные перемещения в узлах x_i = i·dx для кусочно-линейного профиля гибрида (интеграл трапециями по узлам). */
+function hybridDisplacements(f: HybridFrame, N: number, dx: number) {
+  const xs = f.xs;
+  const W = f.W;
+  const n = xs.length;
+  const P1 = new Float64Array(N + 1);
+  const P3 = new Float64Array(N + 1);
+  // интеграл от узла 0 до x
+  let j = 0;
+  let a1 = 0;
+  let a3 = 0;
+  const lin = (k: number, x: number, c: number) => {
+    const xa = xs[k];
+    const xb = xs[k + 1];
+    const u = xb > xa ? (x - xa) / (xb - xa) : 0;
+    return W[4 * k + c] + u * (W[4 * k + 4 + c] - W[4 * k + c]);
+  };
+  for (let i = 0; i <= N; i++) {
+    const x = Math.min(i * dx, xs[n - 1]);
+    // целые участки до x
+    while (j < n - 1 && xs[j + 1] <= x) {
+      const len = xs[j + 1] - xs[j];
+      a1 += 0.5 * len * (W[4 * j] + W[4 * j + 4]);
+      a3 += 0.5 * len * (W[4 * j + 1] + W[4 * j + 5]);
+      j++;
+    }
+    let p1 = a1;
+    let p3 = a3;
+    if (j < n - 1 && x > xs[j]) {
+      const len = x - xs[j];
+      p1 += 0.5 * len * (W[4 * j] + lin(j, x, 0));
+      p3 += 0.5 * len * (W[4 * j + 1] + lin(j, x, 1));
+    }
+    P1[i] = p1;
+    P3[i] = p3;
+  }
+  const du1 = new Float64Array(N + 1);
+  const du3 = new Float64Array(N + 1);
+  for (let i = 0; i <= N; i++) {
+    du1[i] = P1[i] - P1[N];
+    du3[i] = P3[i] - P3[N];
+  }
+  return { du1, du3 };
+}
 
 /** Перевести кусочно-постоянное решение метода фронтов в кадры на сетке (для общих графиков). */
 function framesFromFronts(fr: FrontsResult): SeriesResult {
@@ -556,7 +686,25 @@ function renderStatus() {
   if (st.computing) add('info', `Расчёт… ${Math.round(st.computing * 100)}%`);
   const r = st.res;
   const fr = st.fronts;
-  if (r && fr && !st.computing) {
+  const hy = st.hyb;
+  if (r && hy && !st.computing) {
+    const numDiss = hy.work - hy.energyGain - hy.shockDissipation;
+    add(
+      'info',
+      `Гибридный метод: ударные волны выделены точно (условия на разрывах (2.40)–(2.42) на каждом шаге), вееры посчитаны на сетке ${Math.round(hy.cellsPerL)} ячеек на L (всего ${hy.N}) как гладкое решение — без лучей. ` +
+        `${hy.steps} шагов, ${hy.events} точных задач (удары, встречи и отражения ударных волн), до ${hy.maxFronts} выделенных разрывов одновременно, ${st.ms.toFixed(0)} мс. ` +
+        `Кинематический баланс ${hy.kinematicError.toExponential(1)}. Энергия: работа границы ${fmt(hy.work, 4)} = прирост энергии ${fmt(hy.energyGain, 4)} + диссипация на ударных волнах (2.45) ${fmt(hy.shockDissipation, 3)} + численная ${numDiss.toExponential(1)}.`,
+    );
+    add(
+      'info',
+      'Узкий веер, который сетка всё равно не разрешила бы (уже численного размазывания, max(h/2, ½·h^⅔·t^⅓)), ведётся одним разрывом — на диаграмме тонкая линия; как только он становится шире, его ведёт сетка.' +
+        (hy.untracked ? ` Отдано сетке разрывов: ${hy.untracked}.` : ''),
+    );
+    if (hy.cellsPerL < st.hybCells - 0.5)
+      add('warn', `Отрезок длинный (до x1/L = ${fmt(hy.xView, 3)}), поэтому, чтобы расчёт занял разумное время, сетка огрублена до ${Math.round(hy.cellsPerL)} ячеек на L (вместо ${st.hybCells}). Ударные волны от этого не размываются — только вееры.`);
+    if (st.untilQuiet && hy.tQuiet !== undefined) add('info', `Как и у метода фронтов, расчёт идёт до момента, после которого волны больше не встречаются: t c1/L = ${fmt(hy.tEnd, 3)}, на участке до x1/L = ${fmt(hy.xView, 3)}.`);
+    for (const w of hy.warnings) add('err', w);
+  } else if (r && fr && !st.computing) {
     add(
       'info',
       `Метод волновых фронтов: ${fr.events} событий (удары, остановки, встречи и отражения фронтов), до ${fr.maxFronts} фронтов одновременно, шаг веера ${st.fanStep.toExponential(1)}, ${st.ms.toFixed(0)} мс. ` +
@@ -718,6 +866,16 @@ function exactDisplacements(xs: number[], states: { F: number[] }[], N: number, 
  */
 function frameAt(t: number): SeriesFrame {
   const fr = st.fronts;
+  if (st.hyb) {
+    if (exactFrame && exactFrame.t === t && exactFrame.id === reqId) return exactFrame.f;
+    const r = st.res!;
+    const f = hybFrameAt(t);
+    const U = exactFrame?.f.U.length === 6 * r.N ? exactFrame.f.U : new Float32Array(6 * r.N);
+    fillHybrid(f, U, r.N, r.dx);
+    const { du1, du3 } = hybridDisplacements(f, r.N, r.dx);
+    exactFrame = { t, id: reqId, f: { t: f.t, U, ub: f.ub }, du1, du3 };
+    return exactFrame.f;
+  }
   if (!fr) return storedFrameAt(t);
   if (exactFrame && exactFrame.t === t && exactFrame.id === reqId) return exactFrame.f;
   const r = st.res!;
@@ -753,7 +911,6 @@ let exactCache: { key: string; img: HTMLCanvasElement } | null = null;
  * (время — по горизонтали, x — по вертикали).
  */
 function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t: number; b: number }, w: number, h: number, win: { x0: number; x1: number; t0: number; t1: number }) {
-  const fr = st.fronts!;
   const pw = Math.max(1, Math.round(w - m.l - m.r));
   const ph = Math.max(1, Math.round(h - m.t - m.b));
   const key = [win.x0, win.x1, win.t0, win.t1, pw, ph, st.field, reqId, css('--panel'), fieldMax].join('|');
@@ -764,9 +921,30 @@ function drawExactXt(ctx: CanvasRenderingContext2D, m: { l: number; r: number; t
     const ic = img.getContext('2d')!;
     const data = ic.createImageData(pw, ph);
     const base = parseColor(css('--panel'));
-    const nF = fr.frames.length;
-    const T = fr.tEnd;
-    for (let col = 0; col < pw; col++) {
+    for (let col = 0; col < pw && st.hyb; col++) {
+      // гибрид: кусочно-линейный профиль ближайшего сохранённого момента
+      const t = win.t0 + ((col + 0.5) / pw) * (win.t1 - win.t0);
+      const f = hybFrameAt(t);
+      const xs = f.xs;
+      const W = f.W;
+      const n = xs.length;
+      let j = 1;
+      for (let row = ph - 1; row >= 0; row--) {
+        const x = win.x0 + ((ph - 1 - row + 0.5) / ph) * (win.x1 - win.x0);
+        while (j < n - 1 && xs[j] < x) j++;
+        const u = xs[j] > xs[j - 1] ? Math.max(0, Math.min(1, (x - xs[j - 1]) / (xs[j] - xs[j - 1]))) : 1;
+        const o = 4 * (j - 1);
+        const val = (k: number) => W[o + k] + u * (W[o + 4 + k] - W[o + k]);
+        const F: Vec3 = [st.F0[0] + val(0), 0, st.F0[2] + val(1)];
+        const [R, G, B] = diverging(fieldOf(F, [val(2), 0, val(3)]) / fieldMax, base);
+        const q = 4 * (row * pw + col);
+        data.data[q] = R;
+        data.data[q + 1] = G;
+        data.data[q + 2] = B;
+        data.data[q + 3] = 255;
+      }
+    }
+    for (let col = 0; col < pw && !st.hyb; col++) {
       const t = win.t0 + ((col + 0.5) / pw) * (win.t1 - win.t0);
       const { f, xs } = frontsAt(t);
       // цвет каждого состояния этого момента
@@ -938,6 +1116,7 @@ function setupXtZoom() {
 
 /** Состояние среды в точке (x, t): точное для метода фронтов, из ближайшего кадра для КО. */
 function stateAtXt(x: number, t: number): { F: Vec3; v: Vec3 } {
+  if (st.hyb) return hybSampler(hybFrameAt(t))(x);
   if (st.fronts) {
     const { f, xs } = frontsAt(t);
     let j = 0;
@@ -969,6 +1148,11 @@ function stateLines(S: { F: Vec3; v: Vec3 }, title?: string): string[] {
 
 const FAM_NAME = { fast: 'квазипродольный', slow: 'квазипоперечный' } as const;
 
+/** Траектории фронтов (метод фронтов или выделенные разрывы гибрида). */
+function segsOf(): Segment[] {
+  return st.fronts?.segments ?? st.hyb?.segments ?? [];
+}
+
 /**
  * Щелчок по диаграмме: если рядом точка события (встреча фронтов, рождение на границе, отражение) —
  * берётся она; если рядом фронт — показываются его характеристики; иначе — просто (x, t).
@@ -977,7 +1161,7 @@ const FAM_NAME = { fast: 'квазипродольный', slow: 'квазипо
 function pickXt(px: number, py: number, x: number, t: number) {
   const toPx = xtToPx;
   let pick = { x, t, lines: [`t c1/L = ${fmt(t, 4)},  x1/L = ${fmt(x, 4)}`, ...stateLines(stateAtXt(x, t))] };
-  const segs = st.fronts?.segments ?? [];
+  const segs = segsOf();
   if (segs.length && st.showFronts) {
     // 1) события — начала отрезков фронтов (рождение на границе, встреча, отражение)
     const maxStr = Math.max(...segs.map((sg) => sg.strength), 1e-30);
@@ -1025,7 +1209,7 @@ function pickXt(px: number, py: number, x: number, t: number) {
           x: fb.x0 + G * (tt - fb.t0),
           t: tt,
           lines: [
-            `${FAM_NAME[fb.fam]} фронт${fb.kind === 'simple' ? ' (пучок простой волны)' : ' (ударный)'}, ${G >= 0 ? 'вглубь' : 'к границе'}`,
+            `${FAM_NAME[fb.fam]} фронт${fb.kind === 'simple' ? (st.hyb ? ' (тонкий веер — уже ячейки, ведётся одним разрывом)' : ' (пучок простой волны)') : ' (ударный)'}, ${G >= 0 ? 'вглубь' : 'к границе'}`,
             `скорость ${fmt(Math.abs(G), 4)} c1, скачок деформации ${fb.strength.toExponential(1)}`,
             `t c1/L = ${fmt(tt, 4)}, x1/L = ${fmt(fb.x0 + G * (tt - fb.t0), 4)}`,
             `рождён при t = ${fmt(fb.t0, 4)}`,
@@ -1133,7 +1317,7 @@ function drawXt() {
   const sw = ((win.t1 - win.t0) / st.tEnd) * img.width;
   const sy = (1 - win.x1 / st.xView) * img.height;
   const sh = ((win.x1 - win.x0) / st.xView) * img.height;
-  if (st.fronts) drawExactXt(ctx, m, w, h, win);
+  if (st.fronts || st.hyb) drawExactXt(ctx, m, w, h, win);
   else {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(img, sx, sy, sw, sh, m.l, m.t, w - m.l - m.r, h - m.t - m.b);
@@ -1161,13 +1345,13 @@ function drawXt() {
   ctx.rotate(-Math.PI / 2);
   ctx.fillText('x1 / L', 0, 0);
   ctx.restore();
-  // фронты (метод волновых фронтов)
-  if (st.fronts && st.showFronts) {
+  // фронты (метод волновых фронтов; у гибрида — выделенные ударные волны и тонкие вееры)
+  if (segsOf().length && st.showFronts) {
     ctx.save();
     ctx.beginPath();
     ctx.rect(m.l, m.t, w - m.l - m.r, h - m.t - m.b);
     ctx.clip();
-    const segs = st.fronts.segments;
+    const segs = segsOf();
     const maxStr = Math.max(...segs.map((sg) => sg.strength), 1e-30);
     // слабые фронты рисуются первыми, чтобы сильные были сверху
     const order = [...(segs as Segment[])].sort((a, b) => a.strength - b.strength);
@@ -1297,7 +1481,7 @@ function drawStrip() {
   // перемещения относительно предварительно деформированного состояния: Δu(x) = −∫_x^1 (F − F0) dx'
   let du1: Float64Array;
   let du3: Float64Array;
-  if (st.fronts && exactFrame && exactFrame.f === fr) {
+  if ((st.fronts || st.hyb) && exactFrame && exactFrame.f === fr) {
     ({ du1, du3 } = exactFrame); // точные перемещения по положениям фронтов
   } else {
     du1 = new Float64Array(N + 1);
@@ -1560,7 +1744,13 @@ function renderProfiles() {
   let edges: number[];
   let states: { F: Vec3; v: Vec3 }[];
   let smooth: ((x: number) => { F: Vec3; v: Vec3 }) | null = null;
-  if (st.fronts) {
+  if (st.hyb) {
+    const f = hybFrameAt(t);
+    smooth = hybSampler(f);
+    // для автомасштаба — значения в узлах (между узлами профиль линейный)
+    edges = Array.from({ length: f.xs.length - 1 }, (_, i) => 0.5 * (f.xs[i] + f.xs[i + 1]));
+    states = Array.from({ length: f.xs.length }, (_, i) => ({ F: [st.F0[0] + f.W[4 * i], 0, st.F0[2] + f.W[4 * i + 1]] as Vec3, v: [f.W[4 * i + 2], 0, f.W[4 * i + 3]] as Vec3 }));
+  } else if (st.fronts) {
     const { f, xs } = frontsAt(t);
     if (st.smoothFans && f.fan?.some((id, i) => id >= 0 && f.fan[i + 1] === id)) smooth = smoothStateFn(f, xs);
     edges = xs;
@@ -1571,7 +1761,7 @@ function renderProfiles() {
     states = Array.from({ length: r.N }, (_, i) => cell(fr, r.N, i));
   }
   PROFILE_ITEMS.forEach(([, fn], k) => {
-    const label = st.fronts ? 'метод фронтов' : 'конечные объёмы';
+    const label = st.hyb ? 'гибрид (ударные волны + сетка)' : st.fronts ? 'метод фронтов' : 'конечные объёмы';
     const series: PlotSeries[] = [
       smooth
         ? {

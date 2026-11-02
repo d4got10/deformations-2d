@@ -143,6 +143,25 @@ try {
       if (Math.abs(fv.tEnd - ref.tEnd) > 1e-6 * ref.tEnd || Math.abs(fv.xView - ref.xView) > 1e-6 * ref.xView) fail(`КО: время/длина не совпали с методом фронтов: ${JSON.stringify({ fv, ref })}`);
       if (Math.abs(fv.kin) > 1e-12) fail(`КО на длинном отрезке: нарушен кинематический баланс ${fv.kin}`);
       await page.locator('#s-xt').screenshot({ path: `${outDir}/series-fv-long-${scheme}.png` });
+      // гибрид: ударные волны выделены, вееры на сетке; без лавины событий и с точными балансами
+      await page.selectOption('#s-method', 'hybrid');
+      await page.waitForFunction(() => window.__series.computing === 0 && window.__series.hyb, null, { timeout: 180000 });
+      const hy = await page.evaluate(() => ({ w: window.__series.hyb.warnings, kin: window.__series.hyb.kinematicError, ev: window.__series.hyb.events, segs: window.__series.hyb.segments.length, work: window.__series.hyb.work, gain: window.__series.hyb.energyGain, diss: window.__series.hyb.shockDissipation }));
+      if (hy.w.length) fail(`гибрид: предупреждения ${hy.w}`);
+      if (Math.abs(hy.kin) > 1e-7) fail(`гибрид: кинематический баланс ${hy.kin}`);
+      if (hy.ev > 500 || !hy.segs) fail(`гибрид: событий ${hy.ev}, отрезков фронтов ${hy.segs}`);
+      // остаток — численная диссипация на ударных волнах, возникших на сетке из волн сжатия (не выделяются);
+      // здесь (слабое предсжатие, переход через p = 0) ~8 % на 200 ячеек/L и убывает с измельчением
+      if (Math.abs(hy.work - hy.gain - hy.diss) > 0.15 * Math.abs(hy.work)) fail(`гибрид: энергетический баланс ${JSON.stringify(hy)}`);
+      await page.evaluate(() => {
+        const r = document.getElementById('s-time');
+        r.value = '0.3';
+        r.dispatchEvent(new Event('input'));
+      });
+      await page.waitForTimeout(300);
+      if ((await page.locator('#s-profiles canvas').count()) !== 4) fail('гибрид: профилей должно быть 4');
+      await page.locator('#s-xt').screenshot({ path: `${outDir}/series-hybrid-${scheme}.png` });
+      await page.locator('#s-profiles').screenshot({ path: `${outDir}/series-hybrid-profiles-${scheme}.png` });
       await page.selectOption('#s-method', 'fronts');
       await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts, null, { timeout: 120000 });
     }
