@@ -87,6 +87,38 @@ export interface HybridResult {
   N: number;
   tQuiet?: number;
   horizonReached?: boolean;
+  /** Журнал точных задач и потерь выделения (для разбора решения). */
+  log: HybridEvent[];
+}
+
+/** Волна, родившаяся в точной задаче. */
+export interface HybridWave {
+  fam: Fam;
+  /** +1 — вглубь (вправо), −1 — к границе. */
+  dir: number;
+  kind: 'shock' | 'simple';
+  /** Скорость (для веера — по условиям на разрыве между его крайними состояниями). */
+  G: number;
+  /** Скачок деформации |[F]|. */
+  strength: number;
+  /** Ведётся ли дальше как выделенный разрыв (иначе — на сетке). */
+  tracked: boolean;
+  L: State;
+  R: State;
+}
+
+export interface HybridEvent {
+  t: number;
+  x: number;
+  type: 'boundary' | 'collision' | 'reflection' | 'untrack' | 'failed';
+  /** Состояния слева и справа от точки события до неё (для границы — у границы и впереди). */
+  left?: State;
+  right?: State;
+  /** Скорость границы после события (для 'boundary' и 'reflection'). */
+  d?: number;
+  /** Встретившиеся волны (для 'collision'), отражённая волна (для 'reflection'). */
+  incoming?: { fam: Fam; dir: number; kind: 'shock' | 'simple'; G: number; strength: number }[];
+  waves?: HybridWave[];
 }
 
 type V4 = [number, number, number, number];
@@ -227,21 +259,7 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     return [-w[2], -w[3], -fT[0], -fT[1]];
   };
   /** Состояние у границы x = 0 со скоростью (d, 0): по приходящим к границе характеристикам. */
-  const boundaryState = (w: V4, d: number): V4 => {
-    const e = eig(w);
-    const [a, b, dd] = e.A;
-    const det = Math.max(a * dd - b * b, 1e-300);
-    const sq = Math.sqrt(det);
-    const tt = Math.sqrt(a + dd + 2 * sq);
-    const c11 = (a + sq) / tt;
-    const c12 = b / tt;
-    const c22 = (dd + sq) / tt;
-    const cdet = c11 * c22 - c12 * c12;
-    const dv0 = d - w[2];
-    const dv1 = -w[3];
-    // F_b = F + C⁻¹ (v_b − v)
-    return [w[0] + (c22 * dv0 - c12 * dv1) / cdet, w[1] + (-c12 * dv0 + c11 * dv1) / cdet, d, 0];
-  };
+  const boundaryState = (w: V4, d: number): V4 => linearBoundaryState(eig(w).A, w, d);
 
   /** Расхождение характеристик семейства m по обе стороны разрыва (> 0 — это веер). */
   const fanSpread = (wm: V4, wp: V4, m: number) => sigma(eig(wp), m) - sigma(eig(wm), m);
@@ -497,8 +515,13 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
       // если к нему примыкает ударная волна того же семейства (составная волна при невыпуклости:
       // соотношения на фронте не порождают веер своего же семейства) — тогда, пока он узкий.
       const adj = [waves[k - 1], waves[k + 1]].some((q) => q && q.kind === 'shock' && q.fam === w.fam && Math.sign(q.G) === Math.sign(w.G));
+      // Веер, родившийся вместе с выделяемой ударной волной, тоже сначала ведётся одним разрывом:
+      // иначе соседний фронт на первых шагах видит со стороны веера ещё не тронутую сетку (состояние
+      // до события) и соотношения на нём сходятся к чужой ветви. Сетке веер отдаётся, когда станет
+      // шире её размазывания (thin в solveFront) — к этому моменту он уже отошёл от фронта на несколько ячеек.
+      const withShock = waves.some((q, j) => j !== k && q.kind === 'shock' && str(q) >= trackTol);
       const spread = fanSpread(w.L, w.R, mOf(w.fam, Math.sign(w.G)));
-      return spread <= 0 || spread * (tEnd - t) <= numWidth(tEnd - t) || adj;
+      return spread <= 0 || spread * (tEnd - t) <= numWidth(tEnd - t) || adj || withShock;
     });
     const nf: HFront[] = [];
     const gaps: [V4, V4][] = [];
@@ -511,7 +534,8 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
       gl = w.R;
     });
     gaps.push([gl, prev]);
-    return { nf, gaps };
+    const out: HybridWave[] = waves.map((w, k) => ({ fam: w.fam, dir: Math.sign(w.G), kind: w.kind, G: w.G, strength: str(w), tracked: track[k], L: toState(w.L), R: toState(w.R) }));
+    return { nf, gaps, waves: out };
   };
   const passive = (wl: V4, wr: V4): Region => ({ passive: true, wl: [...wl], wr: [...wr], Q: [0, 0, 0, 0], n: 0, xs: new Float64Array(0), U: new Float64Array(0) });
   /** Содержимое исчезающей узкой области — соседней (чтобы балансы сохранялись точно). */
@@ -527,6 +551,8 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
   };
 
   let events = 0;
+  const log: HybridEvent[] = [];
+  const inc = (f: HFront) => ({ fam: f.fam, dir: f.m >= 2 ? 1 : -1, kind: f.kind, G: f.G, strength: strengthF(f) });
   let maxFronts = 0;
   let untracked = 0;
   /** Новые волны у границы x = 0 из состояния a (впереди) при скорости границы d. */
@@ -561,6 +587,7 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     const a = regions[0].passive ? boundaryState(regions[0].wl, dOld) : boundaryState(endValue(regions[0], false), dOld);
     const b = boundaryWaves(a, dNew);
     if (!b) return;
+    log.push({ t, x: 0, type: 'boundary', left: toState(a), d: dNew, waves: b.waves });
     insertAtBoundary(b);
     events++;
   };
@@ -575,6 +602,7 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     if (!rp) {
       // не решилась: обе волны перестают выделяться (их ведёт сетка)
       warnings.push(`t = ${t.toFixed(4)}: встреча ударных волн не решена точно — дальше их ведёт сетка`);
+      log.push({ t, x, type: 'failed', left: toState(l), right: toState(r), incoming: [inc(A), inc(B)] });
       mergeAt(i + 1);
       mergeAt(i);
       untracked += 2;
@@ -592,6 +620,7 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     const b = buildFronts(x, toState(l), seq, [A, B].map((f) => ({ fam: f.fam, dir: f.m >= 2 ? 1 : -1, s: strengthF(f) })));
     const k = b.nf.length;
     events++;
+    log.push({ t, x, type: 'collision', left: toState(l), right: toState(r), incoming: [inc(A), inc(B)], waves: b.waves });
     if (!k) {
       // все волны — простые: области сливаются, разрыв l | r дальше ведёт сетка
       regions[i + 1].wl = l;
@@ -618,6 +647,7 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     const b = boundaryWaves(a, dCur);
     events++;
     if (!b) return;
+    log.push({ t, x: 0, type: 'reflection', left: toState(f.wm), right: toState(a), d: dCur, incoming: [inc(f)], waves: b.waves });
     insertAtBoundary(b);
   };
 
@@ -873,6 +903,8 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     }
     if (failed >= 0) {
       // ударная волна ослабла (или её «съел» веер) — дальше её ведёт сетка
+      const ff = fronts[failed];
+      log.push({ t, x: ff.x, type: 'untrack', left: toState(ff.wm), right: toState(ff.wp), incoming: [inc(ff)] });
       mergeAt(failed);
       untracked++;
       continue;
@@ -1042,7 +1074,29 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     xView: L,
     cellsPerL: N / L,
     N,
+    log,
   };
+}
+
+/** Квадратный корень C = (A + √det A·I)/√(tr A + 2√det A) симметричной положительно определённой A = [a, b; b, d]. */
+export function sqrtSym(a: number, b: number, d: number): [number, number, number] {
+  const sq = Math.sqrt(Math.max(a * d - b * b, 1e-300));
+  const tt = Math.sqrt(a + d + 2 * sq);
+  return [(a + sq) / tt, b / tt, (d + sq) / tt];
+}
+
+/**
+ * Граничное состояние по линейной акустике: на характеристиках, приходящих к границе x = 0
+ * (скорость −C), сохраняется v + C·F, поэтому при скорости границы (d, 0)
+ *   F_b = F − C⁻¹ (v_b − v),  v_b = (d, 0).
+ * A = [a11, a12, a22] — акустическая матрица в состоянии w = (p, s, v1, v3).
+ */
+export function linearBoundaryState(A: [number, number, number], w: [number, number, number, number], d: number): [number, number, number, number] {
+  const [c11, c12, c22] = sqrtSym(A[0], A[1], A[2]);
+  const cdet = c11 * c22 - c12 * c12;
+  const dv0 = d - w[2];
+  const dv1 = -w[3];
+  return [w[0] - (c22 * dv0 - c12 * dv1) / cdet, w[1] - (-c12 * dv0 + c11 * dv1) / cdet, d, 0];
 }
 
 /** Состояние в точке x кадра (линейная интерполяция по узлам; на фронте — справа, если right). */
