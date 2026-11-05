@@ -271,18 +271,69 @@ function wave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number, 
     // сливаются в ударную волну — получается составная волна «веер + ударная».
     let e = eps / n;
     if (prevDir && (-Rj.r[0] * prevDir[0] - Rj.r[1] * prevDir[1]) * Math.sign(-e) < 0) e = -e;
-    const { Xb, G2 } = hugoniot(c, cur.F, f, e, Rj);
-    const G = Math.sqrt(Math.max(G2, 0));
-    // [v] = −G_signed [F] с [·] = справа − слева  ⇒  v_b = v_a + dir·G·(F_a − F_b)
-    const v: V2 = [cur.v[0] + dir * G * (cur.F[0] - Xb[0]), cur.v[1] + dir * G * (cur.F[1] - Xb[1])];
-    const behind = { F: Xb, v };
-    // ступенька разрежения (e < 0 у истинно нелинейного семейства) — фронт простой волны, даже если
-    // он один (так выходят лучи пучка из задачи о распаде разрыва после пересечения с другой волной)
-    pieces.push({ G: dir * G, behind, kind: (R.gnl || n > 1) && e < 0 ? 'simple' : 'shock' });
-    const dl = Math.hypot(Xb[0] - cur.F[0], Xb[1] - cur.F[1]);
-    if (dl > 0) prevDir = [(Xb[0] - cur.F[0]) / dl, (Xb[1] - cur.F[1]) / dl];
-    cur = behind;
+    let { Xb, G2 } = hugoniot(c, cur.F, f, e, Rj);
+    // Одноосный случай (s = 0): материал кусочно-линеен, излом σ(p) при p = 0. Шаг, пересекающий
+    // p = 0, делится ровно в нуле — тогда полка «жёсткого слоя» [γᵇ, γᵃ] точно e = 0, а скорости
+    // по обе стороны — точно c₋ и c₊ (без промежуточного шага с секущей скоростью).
+    let rest: number | null = null;
+    // (только для веера: сжимающий скачок растяжение → сжатие — это одна ударная волна Σ)
+    if (eps < 0 && cur.F[1] === 0 && Math.abs(Xb[1]) <= 1e-18 && cur.F[0] * Xb[0] < 0) {
+      const frac = cur.F[0] / (cur.F[0] - Xb[0]);
+      rest = e * (1 - frac);
+      ({ Xb, G2 } = hugoniot(c, cur.F, f, e * frac, Rj));
+      Xb = [0, 0];
+      const T = T2(c, cur.F);
+      G2 = T[0] / cur.F[0];
+    }
+    const pushStep = (Xb: V2, G2: number, e: number) => {
+      const G = Math.sqrt(Math.max(G2, 0));
+      // [v] = −G_signed [F] с [·] = справа − слева  ⇒  v_b = v_a + dir·G·(F_a − F_b)
+      const v: V2 = [cur.v[0] + dir * G * (cur.F[0] - Xb[0]), cur.v[1] + dir * G * (cur.F[1] - Xb[1])];
+      const behind = { F: Xb, v };
+      // ступенька разрежения (e < 0 у истинно нелинейного семейства) — фронт простой волны, даже если
+      // он один (так выходят лучи пучка из задачи о распаде разрыва после пересечения с другой волной)
+      pieces.push({ G: dir * G, behind, kind: (R.gnl || n > 1) && e < 0 ? 'simple' : 'shock' });
+      const dl = Math.hypot(Xb[0] - cur.F[0], Xb[1] - cur.F[1]);
+      if (dl > 0) prevDir = [(Xb[0] - cur.F[0]) / dl, (Xb[1] - cur.F[1]) / dl];
+      cur = behind;
+    };
+    pushStep(Xb, G2, e);
+    if (rest !== null) {
+      const R0 = orientedR(c, cur.F, f);
+      let e2 = rest;
+      if (prevDir && (-R0.r[0] * prevDir[0] - R0.r[1] * prevDir[1]) * Math.sign(-e2) < 0) e2 = -e2;
+      const h2 = hugoniot(c, cur.F, f, e2, R0);
+      // из нуля: однородность — G² = T(Xb)·Xb/|Xb|² точно
+      const Tb = T2(c, h2.Xb);
+      const d2 = h2.Xb[0] ** 2 + h2.Xb[1] ** 2;
+      pushStep(h2.Xb, d2 > 0 ? (Tb[0] * h2.Xb[0] + Tb[1] * h2.Xb[1]) / d2 : h2.G2, e2);
+    }
   }
+  // Соседние шаги одной скорости (линейная ветвь материала, например сжатие или растяжение при s = 0)
+  // — один контактный разрыв: он не расходится, поэтому ведётся как разрыв, а не как луч веера.
+  if (pieces.length > 1) {
+    const merged: WaveOut['pieces'] = [];
+    let cnt = 0;
+    for (const pc of pieces) {
+      const last = merged.at(-1);
+      if (last && Math.abs(last.G - pc.G) <= 1e-9 * Math.abs(pc.G)) {
+        last.behind = pc.behind;
+        cnt++;
+        last.kind = 'shock';
+      } else {
+        merged.push({ ...pc });
+        cnt = 1;
+      }
+    }
+    void cnt;
+    pieces.length = 0;
+    pieces.push(...merged);
+  }
+  // Одноосный случай (s ≡ 0): материал кусочно-линеен, веера нет — разрежение внутри ветви —
+  // контактный разрыв, через p = 0 — два контактных разрыва (жёсткий слой). Все они не расходятся
+  // и ведутся как разрывы (у ненапряжённого состояния нет определённой скорости характеристик,
+  // поэтому оценка «ширины веера» по ней была бы неверна).
+  if (a.F[1] === 0 && pieces.every((pc) => pc.behind.F[1] === 0)) for (const pc of pieces) pc.kind = 'shock';
   return { pieces, behind: cur };
 }
 

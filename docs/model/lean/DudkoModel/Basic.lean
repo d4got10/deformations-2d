@@ -172,6 +172,41 @@ theorem linear_contact (E p₁ p₂ : ℝ) :
     (E * p₁ ^ 2 / 2 - E * p₂ ^ 2 / 2) - (E * p₁ + E * p₂) / 2 * (p₁ - p₂) = 0 := by
   ring
 
+/-! ## A.3b. Одноосная задача (Лаптева, Дудко, Рагозина, 2022): исходы инцидентов 4 и 5
+
+`a`, `b` — скорости волн сжатия и растяжения; `L`, `R` — состояния слева и справа от встретившейся
+пары, `e` — деформация, `v` — скорость. `V = v_R − v_L + a·e_R` — величина из формулы (10) статьи. -/
+
+/-- Инцидент 4 (γᵃ встречает ξ⁻ᵃ; слева `e_L = 0`): при сжатом среднем состоянии
+`v* = v_L + a·e*` (волна γ⁻ᵃ) и `v* = v_R + a(e_R − e*)` (волна ξᵃ) ⇒ `e* = V/(2a)`:
+сжатие (исход 4(a)) ⇔ `V < 0` — как в статье. -/
+theorem incident4_mid (a vL vR eR es : ℝ) (ha : a ≠ 0)
+    (h₁ : vL + a * es = vR + a * (eR - es)) : es = (vR - vL + a * eR) / (2 * a) := by
+  field_simp
+  linear_combination h₁
+
+/-- Инцидент 5 (γᵇ встречает γ⁻ᵃ): при растянутом среднем состоянии волны — ξ⁻ᵇ слева
+(`v* = v_L − b(e_L − e*)`) и жёсткий слой справа (`v* = v_R + a·e_R − b·e*`) ⇒
+`e* = (V + b·e_L)/(2b)`. -/
+theorem incident5_mid (a b vL vR eL eR es : ℝ) (hb : b ≠ 0)
+    (h₁ : vL - b * (eL - es) = vR + a * eR - b * es) :
+    es = (vR - vL + a * eR + b * eL) / (2 * b) := by
+  field_simp
+  linear_combination h₁
+
+/-- Отсюда критерий: растяжение в середине (исход 5(a)) ⇔ `V + b·e_L > 0`.
+(В формуле (10) статьи для инцидента 5 ветви (a) и (b) перепутаны.) -/
+theorem incident5_criterion (a b vL vR eL eR : ℝ) (hb : 0 < b) :
+    0 < (vR - vL + a * eR + b * eL) / (2 * b) ↔ 0 < (vR - vL + a * eR) + b * eL := by
+  have h2 : 0 < 2 * b := by linarith
+  constructor
+  · intro h
+    have := (div_pos_iff_of_pos_right h2).mp h
+    linarith
+  · intro h
+    apply div_pos _ h2
+    linarith
+
 /-! ## A.4. Акустическая матрица: спектр и собственные векторы -/
 
 section Spectrum

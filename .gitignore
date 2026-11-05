@@ -8,3 +8,4 @@ docs/model/*.toc
 docs/model/*.fls
 docs/model/*.fdb_latexmk
 docs/model/figures/case.json
+docs/model/figures/uniaxial.json

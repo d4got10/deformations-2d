@@ -504,12 +504,15 @@ function run(prob: HybridProblem, L: number, tEnd: number, onProgress?: (fractio
     // какие волны выделять: ударные и тонкие вееры (сильнее порога)
     const str = (w: (typeof waves)[number]) => Math.hypot(w.R[0] - w.L[0], w.R[1] - w.L[1]);
     const maxParent = Math.max(0, ...(parents ?? []).map((q) => q.s));
+    const uniaxial = waves.every((w) => w.L[1] === 0 && w.R[1] === 0);
     const track = waves.map((w, k) => {
       if (str(w) < trackTol) return false;
       // При встрече: продолжения встретившихся волн выделяются всегда, а новые (отражения и
       // переходы в другое семейство) — только если они не слабее 1 % встретившихся. Слабые волны
       // отлично считает сетка, а их выделение порождало бы лавину всё более слабых встреч.
-      if (parents && !parents.some((q) => q.fam === w.fam && q.dir === Math.sign(w.G)) && str(w) < 0.01 * maxParent) return false;
+      // В одноосном случае (s ≡ 0) материал кусочно-линеен: все волны — не расходящиеся разрывы, число
+      // встреч конечно и лавины нет, а на сетке разрывы только размазываются — выделяются все.
+      if (parents && !uniaxial && !parents.some((q) => q.fam === w.fam && q.dir === Math.sign(w.G)) && str(w) < 0.01 * maxParent) return false;
       if (w.kind === 'shock') return true;
       // Веер ведётся одним разрывом, если до конца расчёта он останется уже размазывания сетки, или
       // если к нему примыкает ударная волна того же семейства (составная волна при невыпуклости:

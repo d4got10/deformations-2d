@@ -2,9 +2,9 @@
 
 - `model.tex`, `model.pdf` — описание модели, классификация столкновений волн, разбор варианта
   «материал 2, слабое предсжатие, удар — рывок — удар», проверка формул.
-- `lean/` — формальная проверка алгебраических соотношений статьи (Lean 4 + Mathlib), 30 теорем
+- `lean/` — формальная проверка алгебраических соотношений статьи (Lean 4 + Mathlib), 33 теоремы
   в `lean/DudkoModel/Basic.lean`.
-- `figures/` — рисунки (`make_figures.py` строит их из `case.json`, который пишет
+- `figures/` — рисунки (`make_figures.py` строит их из `case.json` и `uniaxial.json`, которые пишут `app/scripts/uniaxial-case.ts` и
   `app/scripts/model-case.ts`; сам `case.json` в репозиторий не кладётся — 4 МБ).
 
 ## Сборка

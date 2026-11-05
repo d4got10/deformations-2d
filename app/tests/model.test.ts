@@ -224,19 +224,15 @@ describe('любая предварительная деформация, в т�
       return e / (d / cm);
     };
     const F0: [number, number, number] = [0, 0, 0];
+    // все волны — разрывы (контактные γ и полка p = 0 ровно в нуле): оба метода дают точное решение
     const f = trackFronts({ material: m, F0, pulses, tEnd: t, frames: 2, xMax: 1.2 });
     expect(f.warnings).toEqual([]);
-    expect(err((x) => stateAt(f.frames.at(-1)!, x).F[0])).toBeLessThan(0.01);
-    const hy = (cpl: number) => {
-      const h = solveHybrid({ material: m, F0, pulses, tEnd: t, frames: 2, length: 1.2, cellsPerL: cpl });
-      expect(h.warnings).toEqual([]);
-      expect(Math.abs(h.kinematicError)).toBeLessThan(1e-14);
-      return err((x) => hybridStateAt(h.frames.at(-1)!, F0, x).F[0]);
-    };
-    const e200 = hy(200);
-    const e800 = hy(800);
-    expect(e800).toBeLessThan(0.6 * e200);
-    expect(e800).toBeLessThan(0.02);
+    expect(err((x) => stateAt(f.frames.at(-1)!, x).F[0])).toBeLessThan(1e-10);
+    const h = solveHybrid({ material: m, F0, pulses, tEnd: t, frames: 2, length: 1.2, cellsPerL: 200 });
+    expect(h.warnings).toEqual([]);
+    expect(Math.abs(h.kinematicError)).toBeLessThan(1e-14);
+    // кадры гибрида хранятся в float32 — отсюда ~1e-8
+    expect(err((x) => hybridStateAt(h.frames.at(-1)!, F0, x).F[0])).toBeLessThan(1e-6);
   });
 
   it('у ненапряжённого состояния нет единой жёсткости: T(0) = 0, секущие модули сжатия и растяжения различны', () => {

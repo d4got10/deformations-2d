@@ -28,22 +28,32 @@ export interface Stress3 {
  */
 function coeffs(m: Material, F: Vec3) {
   const [p, g, s] = F;
-  const q = g * g + s * s;
-  const J1 = p;
-  const J2 = p * p + q / 2;
-  const J3 = p * p * p + 0.75 * p * q;
-  if (!(J2 > 0)) return null;
-  const r = Math.sqrt(J2);
-  const phi = J1 / r;
-  const eta = J3 / (r * r * r);
+  // Масштабирование: инварианты считаются для F/M (M = max|компоненты|), иначе при очень малых
+  // деформациях (численные «предвестники» ~1e-100 перед фронтом в ненапряжённой среде) J3 и J2^{3/2}
+  // уходят в машинный ноль и η = 0/0. Коэффициенты A, B однородны (A — первой степени, B — нулевой),
+  // а C = 3β/√J2 входит только в произведения с квадратичными по F величинами: C·Q = (3β/r')·(Q/M).
+  const M = Math.max(Math.abs(p), Math.abs(g), Math.abs(s));
+  if (!(M > 0)) return null;
+  const P = p / M;
+  const q = (g / M) ** 2 + (s / M) ** 2;
+  const J2s = P * P + q / 2;
+  const rs = Math.sqrt(J2s);
+  const phi = P / rs;
+  const eta = (P * P * P + 0.75 * P * q) / (rs * rs * rs);
+  const r = M * rs;
   return {
-    A: m.lambda * J1 - m.nu * r + 3 * m.alpha * phi * J1,
+    A: m.lambda * p - m.nu * r + 3 * m.alpha * phi * p,
     B: 2 * m.mu - m.nu * phi - m.alpha * phi ** 3 - m.beta * eta,
-    C: (3 * m.beta) / r,
-    J1,
-    J2,
-    J3,
+    /** C·Q для квадратичной по F величины Q. */
+    CQ: (Q: number) => ((3 * m.beta) / rs) * (Q / M),
+    /** C·p (безразмерно). */
+    Cp: (3 * m.beta * P) / rs,
+    J1: p,
     r,
+    M,
+    P,
+    q,
+    rs,
   };
 }
 
@@ -52,14 +62,14 @@ export function stress3(m: Material, F: Vec3): Stress3 {
   const [p, g, s] = F;
   const c = coeffs(m, F);
   if (!c) return { s11: 0, s12: 0, s13: 0, s22: 0, s33: 0, s23: 0 };
-  const { A, B, C } = c;
+  const { A, B, CQ, Cp } = c;
   return {
-    s11: A + B * p + C * (p * p + (g * g + s * s) / 4),
-    s12: (B * g) / 2 + (C * p * g) / 2,
-    s13: (B * s) / 2 + (C * p * s) / 2,
-    s22: A + (C * g * g) / 4,
-    s33: A + (C * s * s) / 4,
-    s23: (C * g * s) / 4,
+    s11: A + B * p + CQ(p * p + (g * g + s * s) / 4),
+    s12: (B * g) / 2 + (Cp * g) / 2,
+    s13: (B * s) / 2 + (Cp * s) / 2,
+    s22: A + CQ(g * g) / 4,
+    s33: A + CQ(s * s) / 4,
+    s23: CQ(g * s) / 4,
   };
 }
 
@@ -68,9 +78,9 @@ export function traction(m: Material, F: Vec3): Vec3 {
   const [p, g, s] = F;
   const c = coeffs(m, F);
   if (!c) return [0, 0, 0];
-  const { A, B, C } = c;
-  const k = (B + C * p) / 2;
-  return [A + B * p + C * (p * p + (g * g + s * s) / 4), k * g, k * s];
+  const { A, B, CQ, Cp } = c;
+  const k = (B + Cp) / 2;
+  return [A + B * p + CQ(p * p + (g * g + s * s) / 4), k * g, k * s];
 }
 
 /**
@@ -82,15 +92,18 @@ export function shearStiffness(m: Material, F: Vec3): number {
   const c = coeffs(m, F);
   // в нуле сдвиговая жёсткость зависит от направления; берём предел вдоль чистого сдвига (p = 0)
   if (!c) return m.mu;
-  return (c.B + c.C * F[0]) / 2;
+  return (c.B + c.Cp) / 2;
 }
 
 /** Упругий потенциал (1.9). */
 export function energy1d(m: Material, F: Vec3): number {
   const c = coeffs(m, F);
   if (!c) return 0;
-  const { J1, J2, J3, r } = c;
-  return 0.5 * m.lambda * J1 * J1 + m.mu * J2 - m.nu * J1 * r + (m.alpha * J1 ** 3) / r + (m.beta * J3) / r;
+  // W однороден второй степени: W(F) = M²·W(F/M)
+  const { M, P, q, rs } = c;
+  const J2s = P * P + q / 2;
+  const J3s = P * P * P + 0.75 * P * q;
+  return M * M * (0.5 * m.lambda * P * P + m.mu * J2s - m.nu * P * rs + (m.alpha * P ** 3) / rs + (m.beta * J3s) / rs);
 }
 
 /**
