@@ -11,15 +11,17 @@ function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, 
 
 /** Подпись деления с числом знаков, достаточным для шага сетки. */
 function tickLabel(v: number, ticks: number[]): string {
-  const step = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : Math.abs(v) || 1;
+  // нулевой шаг бывает у тождественно постоянной величины (например, s ≡ 0 при s0 = 0)
+  const step = (ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 0) || Math.abs(v) || 1;
   const a = Math.max(...ticks.map(Math.abs));
-  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v === 0 ? '0' : v.toExponential(Math.max(0, Math.ceil(-Math.log10(step / a))));
-  const dec = Math.max(0, Math.ceil(-Math.log10(step) - 1e-9));
+  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v === 0 ? '0' : v.toExponential(Math.min(20, Math.max(0, Math.ceil(-Math.log10(step / a)))));
+  const dec = Math.min(20, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9)));
   return v.toFixed(dec);
 }
 
 function niceTicks(min: number, max: number, count = 4): number[] {
-  if (min === max) {
+  // почти постоянная величина (разброс на уровне округления) — как постоянная, иначе деления совпадут
+  if (max - min <= 1e-9 * Math.max(Math.abs(min), Math.abs(max))) {
     const d = Math.abs(min) || 1;
     min -= d * 0.5;
     max += d * 0.5;

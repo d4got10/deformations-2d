@@ -145,9 +145,9 @@ function buildControls() {
   fsM.appendChild(lawRow);
 
   const fsPre = fieldset(c, 'Предварительная деформация (покой)');
-  numRow(fsPre, 'p0', 'p0 = u1,1', () => st.F0[0], (v) => ((st.F0[0] = v), markCustom()), [-0.012, -0.00005, 0.00005], 'p0 < 0: среда сжата');
+  numRow(fsPre, 'p0', 'p0 = u1,1', () => st.F0[0], (v) => ((st.F0[0] = v), markCustom()), [-0.012, 0.012, 0.00005], 'p0 < 0 — сжатие, p0 > 0 — растяжение; p0 = g0 = s0 = 0 — ненапряжённая среда');
   numRow(fsPre, 'g0', 'g0 = u2,1', () => st.F0[1], (v) => ((st.F0[1] = v), markCustom()), [-0.01, 0.01, 0.0005]);
-  numRow(fsPre, 's0', 's0 = u3,1', () => st.F0[2], (v) => ((st.F0[2] = v), markCustom()), [0, 0.01, 0.0005]);
+  numRow(fsPre, 's0', 's0 = u3,1', () => st.F0[2], (v) => ((st.F0[2] = v), markCustom()), [-0.01, 0.01, 0.0005]);
 
   const fsB = fieldset(c, 'Удар по границе x1 = 0');
   const seg = document.createElement('div');
@@ -289,7 +289,8 @@ function recompute() {
   st.error = '';
   st.sol = null;
   try {
-    if (!(st.F0[0] < 0)) throw new Error('Предварительная деформация должна быть сжатием: p0 < 0.');
+    // формула (2.29) выписана в диссертации только для сжатия (k = −1); закон (1.9)–(1.10) — для любых p0, s0
+    if (st.law === 'printed229' && !(st.F0[0] < 0)) throw new Error('Формула (2.29) в напечатанном виде выписана только для сжатия (p0 < 0). Для p0 ≥ 0 выберите закон по потенциалу (1.9).');
     st.sol = solveImpact(problem());
     if (!st.sol) st.error = 'Автомодельное решение не найдено (ни одна комбинация ударных и простых волн не сошлась).';
   } catch (e) {

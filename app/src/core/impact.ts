@@ -21,6 +21,7 @@
 import type { Material } from './material.ts';
 import { type Vec3, energy1d, shearStiffness, traction, traction229 } from './material1d.ts';
 import { newton } from './newton.ts';
+import { boundaryProblem } from './fronts.ts';
 
 export type Family = 'fast' | 'slow';
 export type WaveKind = 'shock' | 'fan' | 'rotation';
@@ -35,6 +36,8 @@ export interface ImpactProblem {
   bc: { type: 'velocity'; d: number } | { type: 'strain'; F: Vec3 };
   /** Какую формулу напряжений использовать: из потенциала (1.9) или напечатанную (2.29). */
   stressLaw?: 'model' | 'printed229';
+  /** Внутреннее: не строить решение по волновым кривым fronts.ts (его вызывает сам fronts.ts). */
+  noWaveCurves?: boolean;
 }
 
 export interface ProfilePoint {
@@ -333,8 +336,77 @@ export function solveImpact(prob: ImpactProblem, forcePattern?: string): ImpactS
     if (!best || (best.issues.length > 0 && issues.length === 0)) best = { ch, issues };
     if (issues.length === 0) break;
   }
+  if ((!best || best.issues.length > 0) && prob.bc.type === 'velocity' && !forcePattern && law === traction && !prob.noWaveCurves) {
+    // Перебор «ударная волна или веер на семейство» не дал допустимого решения (например, при s0 = 0
+    // и переходе p через ноль быстрая волна — два разрыва с полкой p = 0, а медленная вырождена).
+    // Тогда решение строится по волновым кривым метода фронтов (fronts.ts), который годится при любом
+    // состоянии, включая ненапряжённое.
+    const v0 = prob.v0 ?? [0, 0, 0];
+    const ch = chainFromWaveCurves(P, X0, [v0[0], v0[1] * e0[0] + v0[2] * e0[1]], prob.bc.d);
+    if (ch) {
+      const sol = assemble(prob, P, X0, eStar, ch, []);
+      sol.warnings.unshift('Решение построено по волновым кривым (метод фронтов): перебор «ударная волна или гладкий веер» не дал допустимого решения.');
+      return sol;
+    }
+  }
   if (!best) return null;
   return assemble(prob, P, X0, eStar, best.ch, best.issues);
+}
+
+/**
+ * Краевая задача §2.3 по волновым кривым (fronts.ts → boundaryProblem) в виде цепочки
+ * «квазипродольная + квазипоперечная». Волна семейства — либо одна ударная, либо «веер» с
+ * профилем-лестницей: каждый слабый скачок — две точки с одинаковым ξ. Так же представляются
+ * составные волны и вырожденные вееры (разрывы со скоростями c₋, c₊ и полка p = 0 между ними).
+ */
+function chainFromWaveCurves(P: Plane, X0: Vec2, v0: Vec2, d: number): ChainResult | null {
+  const res = boundaryProblem({ m: P.m }, { F: X0, v: v0 }, d, 1e-4);
+  if (!res) return null;
+  const X: Vec2[] = [X0];
+  const dv: Vec2[] = [];
+  const waves: ChainResult['waves'] = [];
+  let a = { F: X0, v: v0 };
+  for (const [w, fam] of [
+    [res.fast, 'fast'],
+    [res.slow, 'slow'],
+  ] as const) {
+    const b = w.behind;
+    // скачки от фронта к тылу; догоняющие (тыловой быстрее) сливаются в одну ударную волну
+    type J = { G: number; A: { F: Vec2; v: Vec2 }; B: { F: Vec2; v: Vec2 } };
+    const js: J[] = [];
+    let cur0 = a;
+    for (const pc of w.pieces) {
+      js.push({ G: pc.G, A: cur0, B: pc.behind });
+      cur0 = pc.behind;
+    }
+    for (let k = 0; k + 1 < js.length; ) {
+      if (js[k + 1].G > js[k].G + 1e-12) {
+        const A = js[k].A;
+        const B = js[k + 1].B;
+        const Ta = T2(P, A.F);
+        const Tb = T2(P, B.F);
+        const dF = [A.F[0] - B.F[0], A.F[1] - B.F[1]];
+        const G = Math.sqrt(Math.max(((Ta[0] - Tb[0]) * dF[0] + (Ta[1] - Tb[1]) * dF[1]) / (dF[0] ** 2 + dF[1] ** 2 || 1e-300), 0));
+        js.splice(k, 2, { G, A, B });
+        if (k > 0) k--;
+      } else k++;
+    }
+    if (js.length === 1) {
+      waves.push({ fam, kind: 'shock', xiFront: js[0].G, xiBack: js[0].G });
+    } else {
+      const prof: { xi: number; X: Vec2; dv: Vec2 }[] = [];
+      for (const j of js) {
+        prof.push({ xi: j.G, X: [...j.A.F] as Vec2, dv: [j.A.v[0] - a.v[0], j.A.v[1] - a.v[1]] });
+        prof.push({ xi: j.G, X: [...j.B.F] as Vec2, dv: [j.B.v[0] - a.v[0], j.B.v[1] - a.v[1]] });
+      }
+      waves.push({ fam, kind: 'fan', xiFront: prof[0].xi, xiBack: prof.at(-1)!.xi, prof });
+    }
+    dv.push([b.v[0] - a.v[0], b.v[1] - a.v[1]]);
+    X.push([...b.F] as Vec2);
+    a = b;
+  }
+  const err = Math.hypot(a.v[0] - d, a.v[1]);
+  return { pattern: waves.map((w) => (w.kind === 'shock' ? 'S' : 'R')).join(''), x: [], residual: err, X: X as [Vec2, Vec2, Vec2], dv: dv as [Vec2, Vec2], waves };
 }
 
 function assemble(prob: ImpactProblem, P: Plane, X0: Vec2, eStar: Vec2 | null, ch: ChainResult, issues: string[]): ImpactSolution {
@@ -406,7 +478,8 @@ function assemble(prob: ImpactProblem, P: Plane, X0: Vec2, eStar: Vec2 | null, c
         xiFront: w.xiFront,
         xiBack: w.xiBack,
         dissipation: dissipation(m, law, mk('a', Fa, va), mk('b', F, v), w.xiFront),
-        lax: { ahead: speed(la), behind: speed(lb), ok: la < w.xiFront ** 2 + 1e-12 && w.xiFront ** 2 < lb + 1e-12 },
+        // волна нулевой амплитуды (например, квазипоперечная при s = 0) условию не подлежит
+        lax: { ahead: speed(la), behind: speed(lb), ok: (la < w.xiFront ** 2 + 1e-12 && w.xiFront ** 2 < lb + 1e-12) || Math.hypot(ch.X[i + 1][0] - ch.X[i][0], ch.X[i + 1][1] - ch.X[i][1]) < 1e-12 },
       });
     } else {
       const prof = w.prof!.map((q) => ({ xi: q.xi, F: to3e(q.X, e), v: add(va, dv3(q.dv, e)) }));

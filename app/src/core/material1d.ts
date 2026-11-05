@@ -20,13 +20,19 @@ export interface Stress3 {
   s23: number;
 }
 
+/**
+ * Коэффициенты закона (1.10). В ненапряжённом состоянии (J2 = 0) потенциал (1.9) не гладок
+ * (однороден второй степени, «конус»), но непрерывен вместе с напряжениями: W(0) = 0, T(0) = 0 —
+ * тогда возвращается null, и вызывающие функции дают нули. Жёсткость в нуле зависит от направления
+ * (сжатие и растяжение — разные модули), её дают секущие (см. acousticAt в fronts.ts/hybrid.ts).
+ */
 function coeffs(m: Material, F: Vec3) {
   const [p, g, s] = F;
   const q = g * g + s * s;
   const J1 = p;
   const J2 = p * p + q / 2;
   const J3 = p * p * p + 0.75 * p * q;
-  if (!(J2 > 0)) throw new Error('J2 = 0: потенциал (1.9) неаналитичен');
+  if (!(J2 > 0)) return null;
   const r = Math.sqrt(J2);
   const phi = J1 / r;
   const eta = J3 / (r * r * r);
@@ -44,7 +50,9 @@ function coeffs(m: Material, F: Vec3) {
 /** Все компоненты тензора напряжений. */
 export function stress3(m: Material, F: Vec3): Stress3 {
   const [p, g, s] = F;
-  const { A, B, C } = coeffs(m, F);
+  const c = coeffs(m, F);
+  if (!c) return { s11: 0, s12: 0, s13: 0, s22: 0, s33: 0, s23: 0 };
+  const { A, B, C } = c;
   return {
     s11: A + B * p + C * (p * p + (g * g + s * s) / 4),
     s12: (B * g) / 2 + (C * p * g) / 2,
@@ -58,7 +66,9 @@ export function stress3(m: Material, F: Vec3): Stress3 {
 /** Вектор напряжений на площадке x1 = const: T = (σ11, σ21, σ31) = ∂W/∂F. */
 export function traction(m: Material, F: Vec3): Vec3 {
   const [p, g, s] = F;
-  const { A, B, C } = coeffs(m, F);
+  const c = coeffs(m, F);
+  if (!c) return [0, 0, 0];
+  const { A, B, C } = c;
   const k = (B + C * p) / 2;
   return [A + B * p + C * (p * p + (g * g + s * s) / 4), k * g, k * s];
 }
@@ -69,13 +79,17 @@ export function traction(m: Material, F: Vec3): Vec3 {
  * (волны поворота) в единицах c1², если модули нормированы на λ+2μ.
  */
 export function shearStiffness(m: Material, F: Vec3): number {
-  const { B, C } = coeffs(m, F);
-  return (B + C * F[0]) / 2;
+  const c = coeffs(m, F);
+  // в нуле сдвиговая жёсткость зависит от направления; берём предел вдоль чистого сдвига (p = 0)
+  if (!c) return m.mu;
+  return (c.B + c.C * F[0]) / 2;
 }
 
 /** Упругий потенциал (1.9). */
 export function energy1d(m: Material, F: Vec3): number {
-  const { J1, J2, J3, r } = coeffs(m, F);
+  const c = coeffs(m, F);
+  if (!c) return 0;
+  const { J1, J2, J3, r } = c;
   return 0.5 * m.lambda * J1 * J1 + m.mu * J2 - m.nu * J1 * r + (m.alpha * J1 ** 3) / r + (m.beta * J3) / r;
 }
 

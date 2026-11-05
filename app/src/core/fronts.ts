@@ -181,12 +181,19 @@ function orientedR(c: Ctx, X: V2, f: Fam): { r: V2; lam: number; gnl: boolean } 
   const k = fi(f);
   let r = E.vec[k];
   // шаг должен быть много больше шага внутри eig (иначе знак производной λ тонет в шуме)
-  const h = 1e-3 * Math.max(Math.hypot(X[0], X[1]), 1e-5);
-  const lp = eig(c, [X[0] + h * r[0], X[1] + h * r[1]]).lam[k];
-  const lm = eig(c, [X[0] - h * r[0], X[1] - h * r[1]]).lam[k];
-  const g = (lp - lm) / (2 * h);
-  if (g < 0) r = [-r[0], -r[1]];
-  return { r, lam: E.lam[k], gnl: Math.abs(g) > 1e-9 * Math.max(E.lam[k], 1e-6) };
+  const sc = Math.max(Math.hypot(X[0], X[1]), 1e-5);
+  const dl = (h: number) => eig(c, [X[0] + h * r[0], X[1] + h * r[1]]).lam[k] - eig(c, [X[0] - h * r[0], X[1] - h * r[1]]).lam[k];
+  // Порог — выше шума численного дифференцирования в eig (~1e-9·λ): λ однородна нулевой степени,
+  // поэтому у истинно нелинейного семейства на шаге 1e-3·|X| она меняется на ~1e-3·λ.
+  const tol = 1e-6 * Math.max(E.lam[k], 1e-6);
+  const g = dl(1e-3 * sc);
+  const gnl = Math.abs(g) > tol;
+  // Если локально скорость постоянна (при s = 0 материал кусочно-линеен), направление сжатия
+  // определяется на большем шаге — по тому, в какую сторону лежит более жёсткая область.
+  let go = g;
+  for (let h = 1e-2 * sc; !gnl && Math.abs(go) <= tol && h <= 3 * sc; h *= 3) go = dl(h);
+  if (go < 0) r = [-r[0], -r[1]];
+  return { r, lam: E.lam[k], gnl };
 }
 
 /**
@@ -241,10 +248,18 @@ interface WaveOut {
  * ε ≥ 0 (или линейно вырожденное семейство) — одна ударная волна; ε < 0 — простая волна,
  * разбитая на n слабых фронтов.
  */
-function wave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number): WaveOut {
+function wave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number, split = false): WaveOut {
   const R = orientedR(c, a.F, f);
   // число фронтов пучка задаётся извне и не меняется внутри итераций Ньютона (иначе невязка разрывна)
-  const n = eps >= 0 || !R.gnl ? 1 : nFan;
+  // Разрежение разбивается на слабые скачки и у линейно вырожденного в точке a семейства: при s = 0
+  // материал кусочно-линеен (разные модули при p < 0 и p > 0), и веер, проходящий через p = 0, —
+  // это два разрыва со скоростями c₋ и c₊ и полка p = 0 между ними, а не один разрыв (он был бы
+  // недопустимой «ударной волной разрежения»). Скачки одной скорости потом снова сливаются.
+  // split: сжимающая волна тоже разбивается на слабые скачки — нужно при невыпуклости, когда одна
+  // ударная волна недопустима (D < 0): догоняющие скачки потом сливаются в ударную волну, остальные
+  // образуют веер позади неё (составная волна «ударная + веер»).
+  if (split && eps > 0) return splitWave(c, a, f, dir, eps, nFan, R);
+  const n = eps >= 0 ? 1 : nFan;
   const pieces: WaveOut['pieces'] = [];
   let cur = a;
   let prevDir: V2 | null = null;
@@ -263,12 +278,86 @@ function wave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number):
     const behind = { F: Xb, v };
     // ступенька разрежения (e < 0 у истинно нелинейного семейства) — фронт простой волны, даже если
     // он один (так выходят лучи пучка из задачи о распаде разрыва после пересечения с другой волной)
-    pieces.push({ G: dir * G, behind, kind: R.gnl && e < 0 ? 'simple' : 'shock' });
+    pieces.push({ G: dir * G, behind, kind: (R.gnl || n > 1) && e < 0 ? 'simple' : 'shock' });
     const dl = Math.hypot(Xb[0] - cur.F[0], Xb[1] - cur.F[1]);
     if (dl > 0) prevDir = [(Xb[0] - cur.F[0]) / dl, (Xb[1] - cur.F[1]) / dl];
     cur = behind;
   }
   return { pieces, behind: cur };
+}
+
+/**
+ * Составная волна «ударная + веер» при невыпуклости (правило Лю). Ударная волна растёт по ударной
+ * адиабате из a, пока её скорость не сравняется со скоростью характеристики своего семейства позади
+ * (звуковая точка ε*): дальше одна ударная волна стала бы недопустимой (D < 0). Если амплитуда больше
+ * ε*, остаток уходит веером от звукового состояния. ε* зависит только от a, поэтому волна непрерывна
+ * по амплитуде — это важно для Ньютона. Каждый разрыв точно удовлетворяет условиям на разрыве.
+ */
+function splitWave(c: Ctx, a: State, f: Fam, dir: 1 | -1, eps: number, nFan: number, R: { r: V2; gnl: boolean }): WaveOut {
+  const k = fi(f);
+  const h = (e: number) => {
+    const { Xb, G2 } = hugoniot(c, a.F, f, e, R);
+    return Math.sqrt(Math.max(G2, 0)) - Math.sqrt(Math.max(eig(c, Xb).lam[k], 0));
+  };
+  const M = 24;
+  let eStar = -1;
+  let prev = 0;
+  for (let j = 1; j <= M; j++) {
+    const e = (eps * j) / M;
+    if (h(e) >= 0) {
+      let lo = prev;
+      let hi = e;
+      for (let it = 0; it < 40; it++) {
+        const mid = 0.5 * (lo + hi);
+        if (h(mid) >= 0) hi = mid;
+        else lo = mid;
+      }
+      eStar = hi;
+      break;
+    }
+    prev = e;
+  }
+  const shockTo = (e: number): State => {
+    const { Xb, G2 } = hugoniot(c, a.F, f, e, R);
+    const G = Math.sqrt(Math.max(G2, 0));
+    return { F: Xb, v: [a.v[0] + dir * G * (a.F[0] - Xb[0]), a.v[1] + dir * G * (a.F[1] - Xb[1])] };
+  };
+  const shockG = (e: number) => Math.sqrt(Math.max(hugoniot(c, a.F, f, e, R).G2, 0));
+  if (eStar < 0) {
+    const b = shockTo(eps);
+    return { pieces: [{ G: dir * shockG(eps), behind: b, kind: 'shock' }], behind: b };
+  }
+  const b = shockTo(eStar);
+  const pieces: WaveOut['pieces'] = [{ G: dir * shockG(eStar), behind: b, kind: 'shock' }];
+  const fan = wave(c, b, f, dir, -(eps - eStar), Math.max(1, nFan));
+  pieces.push(...fan.pieces);
+  return { pieces, behind: fan.behind };
+}
+
+/**
+ * Допустимость волны: на каждом сжимающем скачке диссипация (2.45) D = G([W] − ⟨T⟩·[F]) ≥ 0
+ * ([·] = справа − слева, G со знаком). Около p = 0 материал сильно нелинеен, и Ньютон может сойтись
+ * к «ударной волне разрежения» (D < 0) — такой корень отбрасывается.
+ */
+function admissibleWave(c: Ctx, a: State, w: WaveOut, dir: 1 | -1, rel = 1e-7): boolean {
+  // Проверяется только волна, которая целиком одна ударная волна. У веера (в том числе составного
+  // «веер + ударная») отдельные шаги — дискретизация пути, а не разрывы решения: шаг, перешагнувший
+  // экстремум скорости, формально даёт D < 0 порядка шага, хотя после слияния всё допустимо.
+  if (w.pieces.length !== 1) return true;
+  let cur = a;
+  for (const pc of w.pieces) {
+    if (pc.kind === 'shock') {
+      const [L, R] = dir > 0 ? [pc.behind.F, cur.F] : [cur.F, pc.behind.F];
+      const TL = T2(c, L);
+      const TR = T2(c, R);
+      const dF = [R[0] - L[0], R[1] - L[1]];
+      const work = 0.5 * ((TL[0] + TR[0]) * dF[0] + (TL[1] + TR[1]) * dF[1]);
+      const D = pc.G * (energy1d(c.m, [R[0], 0, R[1]]) - energy1d(c.m, [L[0], 0, L[1]]) - work);
+      if (D < -rel * Math.abs(pc.G * work) - 1e-20) return false;
+    }
+    cur = pc.behind;
+  }
+  return true;
 }
 
 /** Число фронтов пучка для простой волны амплитуды eps. */
@@ -278,14 +367,14 @@ const fanCount = (eps: number, fanStep: number) => Math.max(1, Math.ceil(Math.ab
  * Решить систему с фиксированными числами фронтов пучков; если после схождения амплитуды
  * простых волн сильно отличаются от исходных, числа фронтов пересчитываются и решение повторяется.
  */
-function solveWithFans(F: (e: number[], n: number[]) => number[], g: number[], fanStep: number): { e: number[]; n: number[] } | null {
+function solveWithFans(F: (e: number[], n: number[]) => number[], g: number[], fanStep: number, split = false): { e: number[]; n: number[] } | null {
   let n = g.map((x) => fanCount(x, fanStep));
   let x0 = g;
   for (let pass = 0; pass < 3; pass++) {
     const e = newtonSolve((x) => F(x, n), x0, 1e-5);
     if (!e) return null;
     const n2 = e.map((x) => fanCount(x, fanStep));
-    if (n2.every((v, i) => v === n[i] || e[i] >= 0)) return { e, n };
+    if (n2.every((v, i) => v === n[i] || (e[i] >= 0 && !split))) return { e, n };
     n = n2;
     x0 = e;
   }
@@ -349,9 +438,10 @@ function basis(c: Ctx, X: V2) {
  * Возвращает волны, бегущие вглубь (быстрая, затем медленная).
  */
 export function boundaryProblem(c: Ctx, a: State, d: number, fanStep: number): { fast: WaveOut; slow: WaveOut } | null {
+  let split = false;
   const run = (e: number[], n: number[]) => {
-    const w1 = wave(c, a, 'fast', 1, e[0], n[0]);
-    const w2 = wave(c, w1.behind, 'slow', 1, e[1], n[1]);
+    const w1 = wave(c, a, 'fast', 1, e[0], n[0], split);
+    const w2 = wave(c, w1.behind, 'slow', 1, e[1], n[1], split);
     return { w1, w2 };
   };
   // линеаризация: Δv = −cf α rf − cs β rs = (d − v1, −v3)
@@ -370,44 +460,66 @@ export function boundaryProblem(c: Ctx, a: State, d: number, fanStep: number): {
       },
       guess,
       fanStep,
+      split,
     );
-  let sol = solveFor([d, 0], g);
-  if (!sol) {
-    // Продолжение по параметру: целевая скорость меняется от скорости среды (волн нет) до заданной.
-    // Нужно, когда волна проходит через сильно нелинейную область около p = 0.
-    let e = [0, 0];
-    let ok = true;
-    for (let k = 1; k <= 16 && ok; k++) {
-      const lam = k / 16;
-      const target: V2 = [(1 - lam) * a.v[0] + lam * d, (1 - lam) * a.v[1]];
-      const sk = solveFor(target, e);
-      if (!sk) ok = false;
-      else e = sk.e;
-    }
-    if (ok) sol = solveFor([d, 0], e);
-  }
-  if (!sol) {
-    // Начальное приближение из автомодельного решения главы 2 (impact.ts): амплитуды — проекции
-    // скачков между его зонами на собственные векторы семейств.
-    try {
-      const ex = solveImpact({ material: c.m, F0: [a.F[0], 0, a.F[1]], v0: [a.v[0], 0, a.v[1]], bc: { type: 'velocity', d } });
-      if (ex) {
-        const zs = ex.zones.map((z) => [z.F[0], z.F[2]] as V2);
-        const iFast = ex.waves.findIndex((w) => w.family === 'fast');
-        const iSlow = ex.waves.findIndex((w) => w.family === 'slow');
-        const proj = (i: number, fam: Fam) => {
-          if (i < 0) return 0;
-          const A0 = zs[i];
-          const B0 = zs[i + 1];
-          const r = orientedR(c, A0, fam).r;
-          const sgn = ex.waves[i].kind === 'fan' ? -1 : 1;
-          return sgn * Math.abs((B0[0] - A0[0]) * r[0] + (B0[1] - A0[1]) * r[1]);
-        };
-        sol = solveFor([d, 0], [proj(iFast, 'fast'), proj(iSlow, 'slow')]);
+  let rejected = false;
+  const okSol = (q: { e: number[]; n: number[] } | null) => {
+    if (!q) return null;
+    const { w1, w2 } = run(q.e, q.n);
+    // при разбиении скачки — дискретизация составной волны: допуск соразмерен их величине
+    const rel = split ? 1e-2 : 1e-7;
+    if (admissibleWave(c, a, w1, 1, rel) && admissibleWave(c, w1.behind, w2, 1, rel)) return q;
+    rejected = true;
+    return null;
+  };
+  const attempt = () => {
+    let sol = okSol(solveFor([d, 0], g));
+    // сошлось, но к недопустимой ударной волне — нужна составная волна, сразу к разбиению
+    if (!sol && rejected && !split) return null;
+    if (!sol) {
+      // Продолжение по параметру: целевая скорость меняется от скорости среды (волн нет) до заданной.
+      // Нужно, когда волна проходит через сильно нелинейную область около p = 0.
+      let e = [0, 0];
+      let ok = true;
+      for (let k = 1; k <= 16 && ok; k++) {
+        const lam = k / 16;
+        const target: V2 = [(1 - lam) * a.v[0] + lam * d, (1 - lam) * a.v[1]];
+        const sk = solveFor(target, e);
+        if (!sk) ok = false;
+        else e = sk.e;
       }
-    } catch {
-      /* остаётся null */
+      if (ok) sol = okSol(solveFor([d, 0], e));
     }
+    if (!sol) {
+      // Начальное приближение из автомодельного решения главы 2 (impact.ts): амплитуды — проекции
+      // скачков между его зонами на собственные векторы семейств.
+      try {
+        const ex = solveImpact({ material: c.m, F0: [a.F[0], 0, a.F[1]], v0: [a.v[0], 0, a.v[1]], bc: { type: 'velocity', d }, noWaveCurves: true });
+        if (ex) {
+          const zs = ex.zones.map((z) => [z.F[0], z.F[2]] as V2);
+          const iFast = ex.waves.findIndex((w) => w.family === 'fast');
+          const iSlow = ex.waves.findIndex((w) => w.family === 'slow');
+          const proj = (i: number, fam: Fam) => {
+            if (i < 0) return 0;
+            const A0 = zs[i];
+            const B0 = zs[i + 1];
+            const r = orientedR(c, A0, fam).r;
+            const sgn = ex.waves[i].kind === 'fan' ? -1 : 1;
+            return sgn * Math.abs((B0[0] - A0[0]) * r[0] + (B0[1] - A0[1]) * r[1]);
+          };
+          sol = okSol(solveFor([d, 0], [proj(iFast, 'fast'), proj(iSlow, 'slow')]));
+        }
+      } catch {
+        /* остаётся null */
+      }
+    }
+    return sol;
+  };
+  let sol = attempt();
+  if (!sol) {
+    // невыпуклость: одна ударная волна недопустима — составная волна «ударная + веер»
+    split = true;
+    sol = attempt();
   }
   if (!sol) return null;
   const { w1, w2 } = run(sol.e, sol.n);
@@ -419,11 +531,12 @@ export function boundaryProblem(c: Ctx, a: State, d: number, fanStep: number): {
  * волны, вправо — медленная и быстрая; в середине общее состояние.
  */
 export function riemannProblem(c: Ctx, l: State, r: State, fanStep: number) {
+  let split = false;
   const run = (e: number[], n: number[]) => {
-    const LF = wave(c, l, 'fast', -1, e[0], n[0]);
-    const LS = wave(c, LF.behind, 'slow', -1, e[1], n[1]);
-    const RF = wave(c, r, 'fast', 1, e[3], n[3]);
-    const RS = wave(c, RF.behind, 'slow', 1, e[2], n[2]);
+    const LF = wave(c, l, 'fast', -1, e[0], n[0], split);
+    const LS = wave(c, LF.behind, 'slow', -1, e[1], n[1], split);
+    const RF = wave(c, r, 'fast', 1, e[3], n[3], split);
+    const RS = wave(c, RF.behind, 'slow', 1, e[2], n[2], split);
     return { LF, LS, RS, RF };
   };
   // линеаризация в среднем состоянии
@@ -438,16 +551,58 @@ export function riemannProblem(c: Ctx, l: State, r: State, fanStep: number) {
   ];
   const rhs = [r.F[0] - l.F[0], r.F[1] - l.F[1], r.v[0] - l.v[0], r.v[1] - l.v[1]];
   const g = solveLinear(M, rhs) ?? [0, 0, 0, 0];
-  const sol = solveWithFans(
-    (e, n) => {
-      const w = run(e, n);
-      const a = w.LS.behind;
-      const b = w.RS.behind;
-      return [a.F[0] - b.F[0], a.F[1] - b.F[1], a.v[0] - b.v[0], a.v[1] - b.v[1]];
-    },
-    g,
-    fanStep,
-  );
+  const solveFor = (rr: State, guess: number[]) =>
+    solveWithFans(
+      (e, n) => {
+        const LF = wave(c, l, 'fast', -1, e[0], n[0], split);
+        const LS = wave(c, LF.behind, 'slow', -1, e[1], n[1], split);
+        const RF = wave(c, rr, 'fast', 1, e[3], n[3], split);
+        const RS = wave(c, RF.behind, 'slow', 1, e[2], n[2], split);
+        const a = LS.behind;
+        const b = RS.behind;
+        return [a.F[0] - b.F[0], a.F[1] - b.F[1], a.v[0] - b.v[0], a.v[1] - b.v[1]];
+      },
+      guess,
+      fanStep,
+      split,
+    );
+  let rejected = false;
+  const admissible = (q: { e: number[]; n: number[] } | null, rr: State) => {
+    if (!q) return null;
+    const LF = wave(c, l, 'fast', -1, q.e[0], q.n[0], split);
+    const LS = wave(c, LF.behind, 'slow', -1, q.e[1], q.n[1], split);
+    const RF = wave(c, rr, 'fast', 1, q.e[3], q.n[3], split);
+    const RS = wave(c, RF.behind, 'slow', 1, q.e[2], q.n[2], split);
+    const rel = split ? 1e-2 : 1e-7;
+    if (admissibleWave(c, l, LF, -1, rel) && admissibleWave(c, LF.behind, LS, -1, rel) && admissibleWave(c, rr, RF, 1, rel) && admissibleWave(c, RF.behind, RS, 1, rel)) return q;
+    rejected = true;
+    return null;
+  };
+  const attempt = () => {
+    let sol = admissible(solveFor(r, g), r);
+    if (!sol && rejected && !split) return null;
+    if (!sol) {
+      // Продолжение по параметру: правое состояние меняется от левого (волн нет) до заданного —
+      // решение остаётся на физической ветви.
+      let e = [0, 0, 0, 0];
+      let ok = true;
+      for (let k = 1; k <= 16 && ok; k++) {
+        const lam = k / 16;
+        const rr: State = { F: [l.F[0] + lam * (r.F[0] - l.F[0]), l.F[1] + lam * (r.F[1] - l.F[1])], v: [l.v[0] + lam * (r.v[0] - l.v[0]), l.v[1] + lam * (r.v[1] - l.v[1])] };
+        const sk = solveFor(rr, k === 1 ? g.map((x) => x / 16) : e);
+        if (!sk) ok = false;
+        else e = sk.e;
+      }
+      if (ok) sol = admissible(solveFor(r, e), r);
+    }
+    return sol;
+  };
+  let sol = attempt();
+  if (!sol) {
+    // невыпуклость: одна ударная волна недопустима — составная волна «ударная + веер»
+    split = true;
+    sol = attempt();
+  }
   if (!sol) return null;
   return run(sol.e, sol.n);
 }

@@ -25,6 +25,8 @@ const MATERIALS: Record<string, { material: Material; F0: Vec3 }> = {
   'Материал 1 (ν < 0), как в §2.3': { material: MATERIAL_1, F0: [-0.00005, 0, 0.001] },
   'Материал 2 (ν > 0), как в §2.3': { material: MATERIAL_2, F0: [-0.005, 0, 0.001] },
   'Материал 2, слабое предсжатие p0 = −0.0005 (растяжение достижимо)': { material: MATERIAL_2, F0: [-0.0005, 0, 0.001] },
+  'Материал 2, предварительное растяжение p0 = +0.001': { material: MATERIAL_2, F0: [0.001, 0, 0.001] },
+  'Материал 2, ненапряжённая среда p0 = s0 = 0': { material: MATERIAL_2, F0: [0, 0, 0] },
 };
 
 const PULSE_PRESETS: Record<string, Pulse[]> = {
@@ -455,11 +457,6 @@ function problem(): SeriesProblem {
 
 async function compute() {
   st.error = '';
-  if (!(st.F0[0] < 0)) {
-    st.error = 'Предварительная деформация должна быть сжатием: p0 < 0.';
-    renderStatus();
-    return;
-  }
   const id = ++reqId;
   if (!st.computing) busySince = performance.now();
   st.computing = 0.001;

@@ -104,14 +104,23 @@ describe('численный решатель (конечные объёмы) п
     });
   }
 
-  it('разномодульность: у материала 1 повторное сжатие — веер, разгрузка — ударная волна; у материала 2 — наоборот', () => {
-    const kinds = (m: (typeof CASES)[number][1], F0: Vec3) => {
+  it('разномодульность: у материала 1 повторное сжатие — веер, разгрузка — составная волна «ударная + веер»; у материала 2 — ударная и веер', () => {
+    const solve = (m: (typeof CASES)[number][1], F0: Vec3) => {
       const z = solveImpact({ material: m, F0, bc: { type: 'velocity', d: 0.001 } })!.zones.at(-1)!;
       const up = solveImpact({ material: m, F0: z.F, v0: z.v, bc: { type: 'velocity', d: 0.003 } })!;
       const down = solveImpact({ material: m, F0: z.F, v0: z.v, bc: { type: 'velocity', d: 0 } })!;
-      return [up.waves[0].kind, down.waves[0].kind];
+      return { up, down };
     };
-    expect(kinds(CASES[0][1], CASES[0][2])).toEqual(['fan', 'shock']);
-    expect(kinds(CASES[1][1], CASES[1][2])).toEqual(['shock', 'fan']);
+    const a = solve(CASES[0][1], CASES[0][2]);
+    expect(a.up.waves[0].kind).toBe('fan');
+    // одна ударная волна разгрузки нарушала бы (2.45) (D < 0): решение — ударная волна, к тылу
+    // которой примыкает веер; в профиле волны это скачок (две точки с одним ξ), затем гладкий участок
+    const w = a.down.waves[0];
+    expect(w.kind).toBe('fan');
+    expect(w.profile![1].xi).toBe(w.profile![0].xi);
+    expect(Math.abs(w.profile![1].F[0] - w.profile![0].F[0])).toBeGreaterThan(1e-5);
+    expect(a.down.warnings.some((s) => s.includes('(2.45)') || s.includes('Лакс'))).toBe(false);
+    const b = solve(CASES[1][1], CASES[1][2]);
+    expect([b.up.waves[0].kind, b.down.waves[0].kind]).toEqual(['shock', 'fan']);
   });
 });

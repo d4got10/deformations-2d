@@ -3,8 +3,8 @@
  * (алгебраические тождества проверены в Lean: docs/model/lean).
  */
 import { describe, expect, it } from 'vitest';
-import { boundaryProblem, riemannProblem } from '../src/core/fronts.ts';
-import { linearBoundaryState, solveHybrid, sqrtSym } from '../src/core/hybrid.ts';
+import { boundaryProblem, riemannProblem, stateAt, trackFronts } from '../src/core/fronts.ts';
+import { hybridStateAt, linearBoundaryState, solveHybrid, sqrtSym } from '../src/core/hybrid.ts';
 import { normalize } from '../src/core/material.ts';
 import { energy1d, stress3, traction } from '../src/core/material1d.ts';
 import { MATERIAL_1, MATERIAL_2 } from '../src/core/presets.ts';
@@ -197,4 +197,85 @@ describe('разбор варианта статьи (материал 2, p0 = �
     expect(kinds(stop)).toBe('slow:simple,fast:simple');
     expect(Math.abs(r.kinematicError)).toBeLessThan(1e-12);
   });
+});
+
+describe('любая предварительная деформация, в том числе ненапряжённая среда', () => {
+  it('p0 = s0 = 0: удар и рывок — точное кусочно-линейное решение (разрывы c₋, c₊ и полка p = 0)', () => {
+    const m = m2;
+    // при s = 0 материал кусочно-линеен: σ11 = c₋² p при p < 0 и c₊² p при p > 0
+    const cm = Math.sqrt(-T2(m, [-1e-3, 0])[0] / 1e-3);
+    const cp = Math.sqrt(T2(m, [1e-3, 0])[0] / 1e-3);
+    expect(cm).toBeCloseTo(1.0812, 4);
+    expect(cp).toBeCloseTo(0.9116, 4);
+    const d = 0.002;
+    const pulses = [
+      { start: 0, duration: 0.25, d },
+      { start: 0.25, duration: 0.25, d: -d },
+    ];
+    const t = 1;
+    const exact = (x: number) => (x > cm * t ? 0 : x > cm * (t - 0.25) ? -d / cm : x > cp * (t - 0.25) ? 0 : x > cp * (t - 0.5) ? d / cp : 0);
+    const err = (f: (x: number) => number) => {
+      let e = 0;
+      const K = 12000;
+      for (let i = 0; i < K; i++) {
+        const x = (1.2 * (i + 0.5)) / K;
+        e += (Math.abs(f(x) - exact(x)) * 1.2) / K;
+      }
+      return e / (d / cm);
+    };
+    const F0: [number, number, number] = [0, 0, 0];
+    const f = trackFronts({ material: m, F0, pulses, tEnd: t, frames: 2, xMax: 1.2 });
+    expect(f.warnings).toEqual([]);
+    expect(err((x) => stateAt(f.frames.at(-1)!, x).F[0])).toBeLessThan(0.01);
+    const hy = (cpl: number) => {
+      const h = solveHybrid({ material: m, F0, pulses, tEnd: t, frames: 2, length: 1.2, cellsPerL: cpl });
+      expect(h.warnings).toEqual([]);
+      expect(Math.abs(h.kinematicError)).toBeLessThan(1e-14);
+      return err((x) => hybridStateAt(h.frames.at(-1)!, F0, x).F[0]);
+    };
+    const e200 = hy(200);
+    const e800 = hy(800);
+    expect(e800).toBeLessThan(0.6 * e200);
+    expect(e800).toBeLessThan(0.02);
+  });
+
+  it('у ненапряжённого состояния нет единой жёсткости: T(0) = 0, секущие модули сжатия и растяжения различны', () => {
+    expect(T2(m2, [0, 0])).toEqual([0, 0]);
+    expect(W(m2, [0, 0])).toBe(0);
+    // T однородна первой степени: T(εF) = εT(F)
+    for (const F of states) {
+      const a = T2(m2, F);
+      const b = T2(m2, [3 * F[0], 3 * F[1]]);
+      expect(b[0]).toBeCloseTo(3 * a[0], 14);
+      expect(b[1]).toBeCloseTo(3 * a[1], 14);
+    }
+  });
+
+  it('невыпуклость около p = 0: рывок из (p, s) = (0, 0.001) — составная волна «ударная + веер», D ≥ 0', () => {
+    const res = boundaryProblem({ m: m2 }, { F: [0, 0.001], v: [0, 0] }, -0.002, 2.5e-4)!;
+    expect(res).not.toBeNull();
+    const kinds = res.fast.pieces.map((p) => p.kind);
+    // сначала сжимающие (для этого семейства) скачки — они сольются в ударную волну, затем веер
+    expect(kinds[0]).toBe('shock');
+    expect(kinds.at(-1)).toBe('simple');
+    expect(res.fast.pieces[0].G).toBeGreaterThan(res.fast.pieces.at(-1)!.G + 0.05);
+  });
+
+  for (const F0 of [
+    [0.001, 0, 0.001],
+    [0, 0, 0.001],
+    [0.002, 0, 0],
+  ] as [number, number, number][])
+    it(`F0 = (${F0[0]}, ${F0[2]}): серия «удар — рывок — удар» считается обоими методами без предупреждений`, () => {
+      const pulses = [
+        { start: 0, duration: 0.25, d: 0.002 },
+        { start: 0.25, duration: 0.25, d: -0.002 },
+        { start: 0.5, duration: 0.25, d: 0.002 },
+      ];
+      const f = trackFronts({ material: m2, F0, pulses, tEnd: 1.2, frames: 2, xMax: 1.4 });
+      expect(f.warnings).toEqual([]);
+      const h = solveHybrid({ material: m2, F0, pulses, tEnd: 1.2, frames: 2, length: 1.4, cellsPerL: 200 });
+      expect(h.warnings).toEqual([]);
+      expect(Math.abs(h.kinematicError)).toBeLessThan(1e-13);
+    }, 30000);
 });

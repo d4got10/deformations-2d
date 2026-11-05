@@ -43,6 +43,18 @@ try {
     await page.dispatchEvent('#i-in-tau', 'change');
     await page.waitForSelector('#i-sweep svg polyline');
     await page.screenshot({ path: `${outDir}/ch2-normal-${scheme}.png`, fullPage: true });
+    // ненапряжённая среда: решение главы 2 существует (по волновым кривым)
+    for (const [key, val] of [['p0', '0'], ['s0', '0']]) {
+      await page.fill(`#i-in-${key}`, val);
+      await page.dispatchEvent(`#i-in-${key}`, 'change');
+    }
+    await page.waitForTimeout(500);
+    {
+      const z = await page.evaluate(() => ({ err: window.__impact.error, n: window.__impact.sol?.waves.length, xi: window.__impact.sol?.waves.map((w) => w.xiFront) }));
+      if (z.err || !z.n || Math.abs(z.xi[0] - 1.00736) > 1e-3) fail(`глава 2, p0 = s0 = 0: ${JSON.stringify(z)}`);
+    }
+    await page.selectOption('#i-preset', { index: 0 });
+    await page.waitForTimeout(300);
     // §2.4.2 с веером
     await page.selectOption('#i-preset', { index: 4 });
     await page.waitForTimeout(300);
@@ -164,6 +176,22 @@ try {
       await page.locator('#s-profiles').screenshot({ path: `${outDir}/series-hybrid-profiles-${scheme}.png` });
       await page.selectOption('#s-method', 'fronts');
       await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts, null, { timeout: 120000 });
+      // ненапряжённая среда (p0 = s0 = 0) и предварительное растяжение: оба точных метода считают без ошибок
+      for (const idx of [3, 4]) {
+        await page.selectOption('#s-material', { index: idx });
+        await page.waitForTimeout(300);
+        await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts, null, { timeout: 120000 });
+        const fr = await page.evaluate(() => ({ err: window.__series.error, w: window.__series.fronts.warnings, kin: window.__series.fronts.kinematicError, F0: window.__series.F0 }));
+        // у материала 2 около p = 0 метод фронтов уходит в огрублённый режим (пороги 1e-7): баланс ~1e-5
+        if (fr.err || fr.w.length || Math.abs(fr.kin) > 1e-4) fail(`фронты, F0 = ${fr.F0}: ${JSON.stringify(fr)}`);
+        await page.selectOption('#s-method', 'hybrid');
+        await page.waitForFunction(() => window.__series.computing === 0 && window.__series.hyb, null, { timeout: 180000 });
+        const h2 = await page.evaluate(() => ({ err: window.__series.error, w: window.__series.hyb.warnings, kin: window.__series.hyb.kinematicError, F0: window.__series.F0 }));
+        if (h2.err || h2.w.length || Math.abs(h2.kin) > 1e-10) fail(`гибрид, F0 = ${h2.F0}: ${JSON.stringify(h2)}`);
+        if (idx === 4) await page.locator('#s-xt').screenshot({ path: `${outDir}/series-zero-state-${scheme}.png` });
+        await page.selectOption('#s-method', 'fronts');
+        await page.waitForFunction(() => window.__series.computing === 0 && window.__series.fronts, null, { timeout: 120000 });
+      }
     }
     await page.selectOption('#s-material', { index: 0 });
     // один удар: численное решение совпадает с точным (пунктир)
