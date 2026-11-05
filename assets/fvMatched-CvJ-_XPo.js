@@ -1,0 +1,1 @@
+import{t as u,d as c}from"./index-XZxeB4sG.js";function f(t,n,i){const a=u({material:t.material,F0:t.F0,pulses:t.pulses,tEnd:t.tEnd,frames:n.frames,untilQuiet:!0,fanStep:n.fanStep}),e=a.xView,l=a.tEnd,r=Math.round(t.N*e),s=Math.max(t.N,Math.min(r,n.maxCells));return{res:c({...t,N:s,length:e,tEnd:l},i),tEnd:l,length:e,cellsPerL:s/e,capped:s<r}}export{f as simulateMatched};
